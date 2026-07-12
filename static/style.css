@@ -403,6 +403,25 @@ body.dragging #drop-hint { display: block; }
 .badge.plain { background: #f0f2f6; color: var(--muted); }
 .me-note { color: var(--muted); font-size: 12px; }
 
+/* ---------- QR 로그인 ---------- */
+.qr-card { text-align: center; }
+.qr-desc { font-size: 13px; color: var(--muted); line-height: 1.6; margin-bottom: 14px; }
+#qr-box {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 220px;
+}
+#qr-img {
+  width: 220px; height: 220px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  image-rendering: pixelated;
+  transition: opacity .2s;
+}
+#qr-img[src=""] { visibility: hidden; }
+.qr-status { font-size: 13px; color: var(--muted); margin-top: 12px; min-height: 1.2em; }
+.qr-status.ok { color: #1d9e50; font-weight: 600; }
+.qr-card .modal-actions { justify-content: center; }
+
 /* ---------- 미리보기 ---------- */
 #preview-modal { position: fixed; inset: 0; z-index: 100; }
 .preview-backdrop { position: absolute; inset: 0; background: rgba(10, 14, 22, .8); }

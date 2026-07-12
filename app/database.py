@@ -45,6 +45,17 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 expires_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS qr_tokens (
+                -- handle: 폴링/이미지 URL에 노출되는 비-교환용 식별자
+                -- token: QR 이미지 안에만 들어가는 실제 교환 비밀 (URL에 절대 노출 안 됨)
+                handle TEXT PRIMARY KEY,
+                token TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                server TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                expires_at TEXT NOT NULL
+            );
             """
         )
         # 구버전 DB 마이그레이션: is_admin 컬럼이 없으면 추가하고 첫 사용자를 관리자로 승격

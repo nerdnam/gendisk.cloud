@@ -148,6 +148,8 @@ def reset_password(body: ResetPassword, admin: dict = Depends(require_admin)):
         )
         # 강제 재로그인 (본인 비밀번호를 재설정한 경우 현재 세션은 change-password를 쓰므로 전부 삭제해도 무방)
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (body.user_id,))
+        # 미사용 QR 페어링 토큰도 무효화
+        conn.execute("DELETE FROM qr_tokens WHERE user_id = ?", (body.user_id,))
         conn.commit()
     finally:
         conn.close()

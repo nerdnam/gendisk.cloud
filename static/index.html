@@ -30,6 +30,7 @@
     <div class="header-actions">
       <span id="whoami"></span>
       <button id="admin-btn" class="btn subtle hidden">👥 사용자 관리</button>
+      <button id="qr-btn" class="btn subtle">📱 QR 로그인</button>
       <button id="pw-btn" class="btn subtle">🔑 비밀번호 변경</button>
       <button id="logout-btn" class="btn subtle">로그아웃</button>
     </div>
@@ -64,6 +65,21 @@
       <main id="file-list"></main>
       <div id="empty-hint" class="hidden">폴더가 비어 있습니다</div>
     </section>
+  </div>
+</div>
+
+<!-- QR 로그인 모달 -->
+<div id="qr-modal" class="modal hidden">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-card qr-card">
+    <h2>📱 QR 로그인</h2>
+    <p class="qr-desc">모바일 앱에서 이 QR 코드를 스캔하면<br>현재 계정으로 바로 로그인됩니다.</p>
+    <div id="qr-box"><img id="qr-img" alt="QR 코드"></div>
+    <p id="qr-status" class="qr-status"></p>
+    <div class="modal-actions">
+      <button id="qr-refresh" class="btn">↻ 새 코드 발급</button>
+      <button type="button" class="btn" data-close>닫기</button>
+    </div>
   </div>
 </div>
 

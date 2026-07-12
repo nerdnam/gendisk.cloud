@@ -538,6 +538,76 @@ $("pw-form").addEventListener("submit", async (e) => {
   }
 });
 
+/* ---------- QR 로그인 ---------- */
+let qrHandle = null;
+let qrTimer = null;
+let qrExpireAt = 0;
+let qrGen = 0; // 발급 세대 — 겹치는 발급/오래된 폴링 응답을 무시하는 데 사용
+
+$("qr-btn").addEventListener("click", () => {
+  $("qr-modal").classList.remove("hidden");
+  issueQr();
+});
+$("qr-refresh").addEventListener("click", issueQr);
+
+async function issueQr() {
+  const gen = ++qrGen; // 이전 발급/폴링을 모두 무효화
+  clearInterval(qrTimer);
+  qrTimer = null;
+  const status = $("qr-status");
+  status.className = "qr-status";
+  status.textContent = "코드 발급 중...";
+  $("qr-img").src = "";
+  try {
+    const res = await postJSON("/api/auth/qr/create", { server: location.origin });
+    if (gen !== qrGen) return; // 그 사이 새 발급이 시작됨
+    qrHandle = res.handle;
+    qrExpireAt = Date.now() + res.expires_in * 1000;
+    $("qr-img").src = `/api/auth/qr/image?handle=${encodeURIComponent(qrHandle)}`;
+    $("qr-img").style.opacity = 1;
+    updateQrCountdown();
+    qrTimer = setInterval(() => pollQr(gen), 2000);
+  } catch (err) {
+    if (gen !== qrGen) return;
+    status.textContent = err.message;
+  }
+}
+
+function updateQrCountdown() {
+  const remain = Math.max(0, Math.round((qrExpireAt - Date.now()) / 1000));
+  $("qr-status").textContent =
+    `앱에서 스캔 대기 중... (${Math.floor(remain / 60)}:${String(remain % 60).padStart(2, "0")} 남음)`;
+}
+
+async function pollQr(gen) {
+  if ($("qr-modal").classList.contains("hidden")) {
+    clearInterval(qrTimer); // 모달이 닫히면 폴링 중단
+    qrTimer = null;
+    return;
+  }
+  let st;
+  try {
+    st = await api(`/api/auth/qr/status?handle=${encodeURIComponent(qrHandle)}`);
+  } catch {
+    return; // 일시적 네트워크 오류는 다음 폴링에서 재시도
+  }
+  if (gen !== qrGen) return; // 오래된 발급의 응답 — 현재 화면에 반영하지 않음
+  const status = $("qr-status");
+  if (st.status === "used") {
+    clearInterval(qrTimer);
+    qrTimer = null;
+    status.className = "qr-status ok";
+    status.textContent = "✅ 기기가 연결되었습니다!";
+  } else if (st.status === "expired") {
+    clearInterval(qrTimer);
+    qrTimer = null;
+    status.textContent = "코드가 만료되었습니다. 새 코드를 발급하세요.";
+    $("qr-img").style.opacity = 0.15;
+  } else {
+    updateQrCountdown();
+  }
+}
+
 /* ---------- 사용자 관리 (관리자) ---------- */
 $("admin-btn").addEventListener("click", () => {
   $("admin-error").textContent = "";

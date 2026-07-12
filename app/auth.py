@@ -1,7 +1,9 @@
 """Password hashing (PBKDF2) and cookie-session auth."""
 import hashlib
+import io
 import secrets
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
@@ -40,8 +42,19 @@ class Credentials(BaseModel):
         return v
 
 
-def current_user(request: Request) -> dict:
+def _session_token(request: Request) -> str | None:
+    """쿠키(웹) 또는 Authorization: Bearer(앱) 어느 쪽으로든 세션 토큰을 받는다."""
     token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        return token
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip()
+    return None
+
+
+def current_user(request: Request) -> dict:
+    token = _session_token(request)
     if not token:
         raise HTTPException(401, "로그인이 필요합니다")
     conn = get_db()
@@ -74,7 +87,7 @@ def require_admin(request: Request) -> dict:
     return user
 
 
-def _create_session(conn, user_id: int, response: Response) -> None:
+def _create_session(conn, user_id: int, response: Response) -> str:
     token = secrets.token_urlsafe(32)
     expires = _utcnow() + timedelta(days=SESSION_DAYS)
     conn.execute(
@@ -89,6 +102,7 @@ def _create_session(conn, user_id: int, response: Response) -> None:
         httponly=True,
         samesite="lax",
     )
+    return token
 
 
 @router.get("/status")
@@ -171,8 +185,10 @@ def change_password(body: ChangePassword, request: Request):
         # 현재 세션만 남기고 다른 기기의 세션은 모두 로그아웃
         conn.execute(
             "DELETE FROM sessions WHERE user_id = ? AND token != ?",
-            (user["id"], request.cookies.get(SESSION_COOKIE)),
+            (user["id"], _session_token(request)),
         )
+        # 미사용 QR 페어링 토큰도 무효화 (비밀번호 변경으로 접근을 끊는 의미를 지키기 위해)
+        conn.execute("DELETE FROM qr_tokens WHERE user_id = ?", (user["id"],))
         conn.commit()
         return {"ok": True}
     finally:
@@ -181,7 +197,7 @@ def change_password(body: ChangePassword, request: Request):
 
 @router.post("/logout")
 def logout(request: Request, response: Response):
-    token = request.cookies.get(SESSION_COOKIE)
+    token = _session_token(request)
     if token:
         conn = get_db()
         try:
@@ -191,3 +207,127 @@ def logout(request: Request, response: Response):
             conn.close()
     response.delete_cookie(SESSION_COOKIE)
     return {"ok": True}
+
+
+# ---------- QR 로그인 (모바일 앱 페어링) ----------
+# 흐름: 웹(로그인 상태)에서 일회용 토큰 발급 → QR로 표시 → 앱이 스캔 후
+# /qr/redeem으로 교환 → 해당 계정의 세션 토큰 획득 (Authorization: Bearer로 사용)
+
+QR_TOKEN_MINUTES = 5
+
+
+def _qr_content(server: str, token: str) -> str:
+    return f"ncloud://login?server={quote(server, safe='')}&token={token}"
+
+
+class QrCreate(BaseModel):
+    server: str = Field(min_length=1, max_length=500)
+
+
+@router.post("/qr/create")
+def qr_create(body: QrCreate, request: Request):
+    user = current_user(request)
+    conn = get_db()
+    try:
+        now = _utcnow()
+        conn.execute(
+            "DELETE FROM qr_tokens WHERE expires_at < ?", (now.isoformat(),)
+        )
+        handle = secrets.token_urlsafe(24)  # URL/폴링용 (교환 불가)
+        token = secrets.token_urlsafe(32)   # QR 안에만 들어가는 교환 비밀
+        expires = now + timedelta(minutes=QR_TOKEN_MINUTES)
+        conn.execute(
+            "INSERT INTO qr_tokens (handle, token, user_id, server, expires_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (handle, token, user["id"], body.server, expires.isoformat()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    # 교환 토큰(token)은 응답에 넣지 않는다 — QR 이미지 안에만 존재한다
+    return {"handle": handle, "expires_in": QR_TOKEN_MINUTES * 60}
+
+
+@router.get("/qr/image")
+def qr_image(handle: str, request: Request):
+    user = current_user(request)
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT server, token FROM qr_tokens "
+            "WHERE handle = ? AND user_id = ? AND used = 0 AND expires_at >= ?",
+            (handle, user["id"], _utcnow().isoformat()),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(404, "QR 토큰을 찾을 수 없습니다")
+    import qrcode
+
+    qr = qrcode.QRCode(box_size=8, border=2)
+    qr.add_data(_qr_content(row["server"], row["token"]))
+    qr.make(fit=True)
+    buf = io.BytesIO()
+    qr.make_image(fill_color="black", back_color="white").save(buf, "PNG")
+    return Response(
+        content=buf.getvalue(),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/qr/status")
+def qr_status(handle: str, request: Request):
+    user = current_user(request)
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT used, expires_at FROM qr_tokens WHERE handle = ? AND user_id = ?",
+            (handle, user["id"]),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {"status": "expired"}
+    if row["used"]:
+        return {"status": "used"}
+    if datetime.fromisoformat(row["expires_at"]) < _utcnow():
+        return {"status": "expired"}
+    return {"status": "pending"}
+
+
+class QrRedeem(BaseModel):
+    token: str = Field(min_length=16, max_length=200)
+
+
+@router.post("/qr/redeem")
+def qr_redeem(body: QrRedeem, response: Response):
+    """앱이 QR에서 얻은 일회용 토큰을 세션 토큰으로 교환한다 (인증 불필요, 1회용)."""
+    conn = get_db()
+    try:
+        # 미사용·미만료 토큰만 원자적으로 사용 처리 (동시 요청 시 한쪽만 성공)
+        cur = conn.execute(
+            "UPDATE qr_tokens SET used = 1 WHERE token = ? AND used = 0 AND expires_at >= ?",
+            (body.token, _utcnow().isoformat()),
+        )
+        if cur.rowcount == 0:
+            conn.commit()
+            raise HTTPException(401, "유효하지 않거나 만료된 QR 토큰입니다")
+        row = conn.execute(
+            """SELECT u.id, u.username FROM qr_tokens q
+               JOIN users u ON u.id = q.user_id WHERE q.token = ?""",
+            (body.token,),
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            raise HTTPException(401, "유효하지 않거나 만료된 QR 토큰입니다")
+        session_token = _create_session(conn, row["id"], response)
+        return {
+            "ok": True,
+            "username": row["username"],
+            "session_token": session_token,
+            "token_type": "Bearer",
+            "expires_days": SESSION_DAYS,
+        }
+    finally:
+        conn.close()
