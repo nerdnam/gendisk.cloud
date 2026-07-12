@@ -131,6 +131,11 @@ def file_kind(path: Path) -> str:
     return "file"
 
 
+def etag_of(stat: os.stat_result) -> str:
+    """콘텐츠 버전 식별자 — 파일이 바뀌면 값이 달라진다 (동기화 변경 감지용)."""
+    return f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
+
+
 def entry_info(path: Path, root: Path) -> dict:
     stat = path.stat()
     is_dir = path.is_dir()
@@ -141,6 +146,7 @@ def entry_info(path: Path, root: Path) -> dict:
         "size": 0 if is_dir else stat.st_size,
         "mtime": int(stat.st_mtime),
         "kind": "folder" if is_dir else file_kind(path),
+        "etag": None if is_dir else etag_of(stat),
     }
 
 
