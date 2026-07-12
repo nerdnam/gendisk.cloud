@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import autostart
-from .client import ApiError, AuthError, GenDiskClient
+from .client import ApiError, AuthError, GenDiskClient, webdav_preflight
 from .config import Config
 from .engine import SyncEngine
 from .webdav_mount import connect_drive, disconnect_drive
@@ -271,11 +271,20 @@ class App:
         if not self.cfg.server_url or not self.cfg.username or not pw:
             messagebox.showwarning("정보 필요", "서버 주소·아이디·비밀번호가 필요합니다.")
             return
+        # 먼저 서버의 /dav 를 직접 확인 → 서버 문제와 로컬(WebClient) 문제를 구분
+        try:
+            webdav_preflight(self.cfg.server_url, self.cfg.username, pw)
+        except RuntimeError as e:
+            messagebox.showerror("서버 확인 실패 (서버 측 문제)", str(e))
+            return
+        # 서버 WebDAV는 정상 → 로컬에서 드라이브로 마운트
         try:
             connect_drive(self.cmb_drive.get(), self.cfg.server_url, self.cfg.username, pw)
             self.log(f"{self.cmb_drive.get()} 드라이브로 연결했습니다.")
         except Exception as e:
-            messagebox.showerror("드라이브 연결 실패", str(e))
+            messagebox.showerror(
+                "드라이브 연결 실패 (로컬 측)",
+                "서버의 WebDAV는 정상 확인됐습니다. 아래는 Windows 쪽 문제입니다.\n\n" + str(e))
 
     def _disconnect_drive(self):
         try:

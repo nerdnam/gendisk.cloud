@@ -27,6 +27,39 @@ class ApiError(Exception):
         self.message = message
 
 
+def webdav_preflight(server_url: str, username: str, password: str):
+    """드라이브 마운트 전에 서버의 /dav 를 직접 확인한다 (WebClient 없이).
+    서버 측 문제(WebDAV 미제공·Cloudflare 차단·인증 실패)면 명확한 메시지로 예외를 던지고,
+    정상(207)이면 조용히 통과한다 → 이후 마운트가 실패하면 로컬 WebClient 문제로 좁혀진다."""
+    import base64
+
+    url = server_url.rstrip("/") + "/dav/"
+    cred = base64.b64encode(f"{username}:{password}".encode()).decode()
+    req = urllib.request.Request(url, method="PROPFIND", headers={
+        "Authorization": "Basic " + cred,
+        "Depth": "0",
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/xml",
+    })
+    try:
+        urllib.request.urlopen(req, timeout=15).read()
+        return  # 207 등 성공 → 서버 정상
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        cf = _blocked_by_cloudflare(e.code, raw)
+        if cf:
+            raise RuntimeError("서버의 /dav 접근이 차단됐습니다.\n" + cf)
+        if e.code in (404, 405, 501):
+            raise RuntimeError(
+                "이 서버는 WebDAV(/dav)를 제공하지 않습니다.\n"
+                "서버를 WebDAV가 포함된 최신 버전(v0.0.8 이상)으로 업데이트하세요.")
+        if e.code == 401:
+            raise RuntimeError("WebDAV 인증에 실패했습니다 — 아이디/비밀번호를 확인하세요.")
+        raise RuntimeError(f"서버 WebDAV 응답 오류 (HTTP {e.code}).")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"서버에 연결할 수 없습니다: {e.reason}")
+
+
 def _blocked_by_cloudflare(status: int, body: str) -> str | None:
     """Cloudflare/WAF 차단이면 사용자에게 도움이 되는 안내 메시지를 만든다."""
     low = body.lower()
