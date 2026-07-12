@@ -87,6 +87,33 @@ def require_admin(request: Request) -> dict:
     return user
 
 
+def verify_basic_auth(header: str | None) -> dict | None:
+    """WebDAV 클라이언트가 보내는 HTTP Basic 인증을 검증한다 (아이디/비밀번호).
+    성공 시 {id, username, is_admin} 반환, 실패 시 None."""
+    if not header or not header.startswith("Basic "):
+        return None
+    import base64
+
+    try:
+        raw = base64.b64decode(header[6:]).decode("utf-8")
+        username, _, password = raw.partition(":")
+    except Exception:
+        return None
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id, username, is_admin, password_hash, salt FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+    finally:
+        conn.close()
+    salt = row["salt"] if row else _DUMMY_SALT
+    attempt = hash_password(password, salt)
+    if row is None or not secrets.compare_digest(row["password_hash"], attempt):
+        return None
+    return {"id": row["id"], "username": row["username"], "is_admin": bool(row["is_admin"])}
+
+
 def _create_session(conn, user_id: int, response: Response) -> str:
     token = secrets.token_urlsafe(32)
     expires = _utcnow() + timedelta(days=SESSION_DAYS)

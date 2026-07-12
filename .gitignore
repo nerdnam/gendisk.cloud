@@ -12,3 +12,8 @@ venv/
 
 # 로컬 도구 설정
 .claude/
+
+# win_x64 클라이언트 빌드 산출물 (PyInstaller)
+win_x64/build/
+win_x64/dist/
+win_x64/*.spec.bak

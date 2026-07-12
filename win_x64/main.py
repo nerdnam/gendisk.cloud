@@ -1,0 +1,30 @@
+"""ncloud-sync 진입점.
+
+  python main.py           GUI 실행
+  python main.py --once    설정에 저장된 대로 한 번만 동기화 (자동화/테스트용)
+"""
+import sys
+
+
+def main():
+    if "--once" in sys.argv:
+        from ncloud_sync.client import NCloudClient
+        from ncloud_sync.config import Config
+        from ncloud_sync.engine import SyncEngine
+
+        cfg = Config.load()
+        if not cfg.is_ready():
+            print("설정이 부족합니다 (서버/토큰/폴더). 먼저 GUI로 로그인·설정하세요.")
+            sys.exit(1)
+        client = NCloudClient(cfg.server_url, cfg.token)
+        engine = SyncEngine(client, cfg.space, cfg.local_folder, log=print)
+        summary = engine.run_once()
+        print("동기화 완료:", summary)
+        return
+
+    from ncloud_sync.app import main as gui_main
+    gui_main()
+
+
+if __name__ == "__main__":
+    main()
