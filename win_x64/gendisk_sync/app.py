@@ -61,9 +61,65 @@ class App:
         self._build_ui()
         self.worker = SyncWorker(self)
         self.worker.start()
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.tray = None
+        self._tray_notified = False
+        self._build_tray()
+        # 닫기(X)는 트레이가 있으면 트레이로 숨기고, 없으면 그냥 종료
+        self.root.protocol("WM_DELETE_WINDOW",
+                           self._hide_to_tray if self.tray else self._real_quit)
         if startup:
-            self.root.iconify()  # 자동 시작이면 최소화 상태로
+            # 자동 시작이면 트레이만 남기고 창은 숨김 (트레이 없으면 최소화)
+            (self._hide_to_tray if self.tray else self.root.iconify)()
+
+    # ---------- 시스템 트레이 ----------
+    def _build_tray(self):
+        try:
+            import pystray
+            from PIL import Image, ImageDraw
+        except Exception:
+            return  # pystray 없으면 트레이 비활성 (닫기 = 종료)
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.ellipse([4, 4, 60, 60], fill=(47, 111, 237, 255))
+        d.ellipse([20, 22, 44, 46], fill=(255, 255, 255, 255))  # 간단한 디스크 모양
+        menu = pystray.Menu(
+            pystray.MenuItem("열기", self._tray_show, default=True),
+            pystray.MenuItem("지금 동기화", lambda i, it: self.root.after(0, self._sync_now)),
+            pystray.MenuItem("종료", self._tray_quit),
+        )
+        try:
+            self.tray = pystray.Icon("gendisk-sync", img, "GenDisk Sync", menu)
+            import threading
+            threading.Thread(target=self.tray.run, daemon=True).start()
+        except Exception:
+            self.tray = None
+
+    def _hide_to_tray(self):
+        self._collect(); self.cfg.save()
+        self.root.withdraw()
+        if not self._tray_notified and self.tray is not None:
+            self._tray_notified = True
+            try:
+                self.tray.notify("트레이에서 계속 실행됩니다. 아이콘을 눌러 다시 열 수 있어요.",
+                                 "GenDisk Sync")
+            except Exception:
+                pass
+
+    def _tray_show(self, icon=None, item=None):
+        self.root.after(0, lambda: (self.root.deiconify(), self.root.lift()))
+
+    def _tray_quit(self, icon=None, item=None):
+        self.root.after(0, self._real_quit)
+
+    def _real_quit(self):
+        self._collect(); self.cfg.save()
+        self.worker.stop()
+        if self.tray is not None:
+            try:
+                self.tray.stop()
+            except Exception:
+                pass
+        self.root.destroy()
         # 시작 시 자동 로그인/드라이브 연결
         if self.cfg.auto_login and self.cfg.username and self.cfg.get_password():
             threading.Thread(target=self._auto_sequence, daemon=True).start()
@@ -330,11 +386,6 @@ class App:
             self.txt_log.see("end")
             self.txt_log.config(state="disabled")
         self.root.after(0, _append)
-
-    def _on_close(self):
-        self._collect(); self.cfg.save()
-        self.worker.stop()
-        self.root.destroy()
 
     def run(self):
         self.root.mainloop()

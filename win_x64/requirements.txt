@@ -1,3 +1,6 @@
-# 런타임 의존성 없음 — 표준 라이브러리(urllib, tkinter)만 사용.
-# .exe 빌드에만 PyInstaller가 필요하다:
+# 런타임: 시스템 트레이 아이콘용 (소스로 실행할 때 필요; .exe에는 번들됨)
+pystray>=0.19
+pillow>=10.0
+
+# .exe 빌드용
 pyinstaller>=6.0
