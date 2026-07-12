@@ -52,15 +52,38 @@ def _unc(server_url: str) -> str:
     return rf"\\{host}{at}\dav"
 
 
-def _ensure_webclient():
-    """WebDAV 마운트에 필요한 WebClient 서비스를 시작한다 (best-effort).
-    이 서비스가 꺼져 있으면 Windows가 WebDAV 경로를 못 찾아 오류 67을 낸다."""
+_NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW
+
+
+def webclient_running() -> bool:
+    """WebDAV 마운트에 필요한 WebClient 서비스가 실행 중인지 (관리자 권한 불필요)."""
     try:
-        subprocess.run(["net", "start", "webclient"],
-                       capture_output=True, timeout=20,
-                       creationflags=0x08000000)  # CREATE_NO_WINDOW
+        out = subprocess.run(["sc", "query", "webclient"], capture_output=True,
+                             text=True, timeout=10, creationflags=_NO_WINDOW)
+        return "RUNNING" in out.stdout.upper()
     except Exception:
-        pass  # 이미 실행 중이거나 권한 없음 — 트리거 시작에 맡긴다
+        return False
+
+
+def start_webclient_elevated():
+    """관리자 권한으로 WebClient를 자동 시작 설정하고 켠다 (UAC 프롬프트 표시)."""
+    inner = ("Set-Service WebClient -StartupType Automatic -ErrorAction SilentlyContinue; "
+             "Start-Service WebClient -ErrorAction SilentlyContinue")
+    launch = (f'Start-Process powershell -Verb RunAs '
+              f'-ArgumentList \'-NoProfile\',\'-WindowStyle\',\'Hidden\',\'-Command\',"{inner}"')
+    subprocess.run(["powershell", "-NoProfile", "-Command", launch],
+                   creationflags=_NO_WINDOW, timeout=120)
+
+
+def _ensure_webclient():
+    """마운트 전에 WebClient를 시작한다 (best-effort, 관리자 아니면 실패할 수 있음)."""
+    if webclient_running():
+        return
+    try:
+        subprocess.run(["net", "start", "webclient"], capture_output=True,
+                       timeout=20, creationflags=_NO_WINDOW)
+    except Exception:
+        pass
 
 
 def _error_message(err: int, unc: str) -> str:

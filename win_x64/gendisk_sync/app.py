@@ -11,7 +11,8 @@ from . import autostart
 from .client import ApiError, AuthError, GenDiskClient, webdav_preflight
 from .config import Config
 from .engine import SyncEngine
-from .webdav_mount import connect_drive, disconnect_drive
+from .webdav_mount import (
+    connect_drive, disconnect_drive, start_webclient_elevated, webclient_running)
 
 
 class SyncWorker(threading.Thread):
@@ -139,6 +140,7 @@ class App:
         self.cmb_drive.set(self.cfg.drive_letter); self.cmb_drive.pack(side="left", padx=(6, 0))
         ttk.Button(drow, text="드라이브 연결", command=self._connect_drive).pack(side="left", padx=(6, 0))
         ttk.Button(drow, text="연결 해제", command=self._disconnect_drive).pack(side="left", padx=(6, 0))
+        ttk.Button(drow, text="WebClient 켜기", command=self._start_webclient).pack(side="left", padx=(6, 0))
 
         self.lbl_status = ttk.Label(frm, text="대기 중", foreground="#0a7")
         self.lbl_status.pack(anchor="w", pady=(8, 0))
@@ -282,9 +284,33 @@ class App:
             connect_drive(self.cmb_drive.get(), self.cfg.server_url, self.cfg.username, pw)
             self.log(f"{self.cmb_drive.get()} 드라이브로 연결했습니다.")
         except Exception as e:
+            extra = ""
+            if not webclient_running():
+                extra = ("\n\n▶ 원인: Windows 'WebClient' 서비스가 꺼져 있습니다.\n"
+                         "   오른쪽 'WebClient 켜기' 버튼을 눌러(관리자 승인) 켠 뒤 다시 연결하세요.")
             messagebox.showerror(
                 "드라이브 연결 실패 (로컬 측)",
-                "서버의 WebDAV는 정상 확인됐습니다. 아래는 Windows 쪽 문제입니다.\n\n" + str(e))
+                "서버의 WebDAV는 정상 확인됐습니다. Windows 쪽 문제입니다.\n\n" + str(e) + extra)
+
+    def _start_webclient(self):
+        if webclient_running():
+            messagebox.showinfo("WebClient", "WebClient 서비스가 이미 실행 중입니다.")
+            return
+        try:
+            start_webclient_elevated()  # UAC 프롬프트
+        except Exception as e:
+            messagebox.showerror("WebClient 시작 실패", str(e))
+            return
+        import time
+        time.sleep(1.5)
+        if webclient_running():
+            self.log("WebClient 서비스를 켰습니다. 이제 드라이브 연결을 다시 시도하세요.")
+            messagebox.showinfo("WebClient", "WebClient 서비스를 켰습니다.\n'드라이브 연결'을 다시 눌러주세요.")
+        else:
+            messagebox.showwarning(
+                "WebClient",
+                "서비스를 켜지 못했습니다 (관리자 승인 거부 또는 서비스 없음).\n"
+                "관리자 PowerShell에서: Set-Service WebClient -StartupType Automatic; Start-Service WebClient")
 
     def _disconnect_drive(self):
         try:
