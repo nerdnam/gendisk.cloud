@@ -493,9 +493,12 @@ async function bulkDelete() {
 async function bulkMove() {
   const paths = [...selection];
   if (!paths.length) return;
-  const dest = prompt("이동할 폴더 경로를 입력하세요 (비우면 저장소 최상위, 예: 문서/2026):", currentPath);
-  if (dest === null) return;
-  const destFolder = dest.replace(/^\/+|\/+$/g, "");
+  // 선택한 폴더 자신·그 하위는 이동 대상이 될 수 없다(자기 안으로 이동 금지).
+  const blocked = currentEntries
+    .filter((e) => e.is_dir && selection.has(e.path))
+    .map((e) => e.path);
+  const destFolder = await pickFolder(currentPath, blocked);
+  if (destFolder === null) return;   // 취소
   let failed = 0, skipped = 0;
   for (const p of paths) {
     const name = p.split("/").pop();
@@ -508,6 +511,106 @@ async function bulkMove() {
   loadDir(currentPath);
   if (failed) alert(`${failed}개 항목을 이동하지 못했습니다.${skipped ? ` (${skipped}개는 같은 위치라 건너뜀)` : ""}`);
 }
+
+/* ---------- 폴더 선택 모달(이동 대상 고르기) ---------- */
+let movePickerPath = "";       // 지금 탐색 중인 폴더
+let movePickerBlocked = [];    // 대상이 될 수 없는 폴더(선택된 폴더와 그 하위)
+let movePickerResolve = null;  // pickFolder 프로미스의 resolve
+
+// 현재 저장소 안에서 목적지 폴더를 골라 그 경로(문자열)를 돌려준다. 취소하면 null.
+function pickFolder(startPath, blocked = []) {
+  movePickerPath = startPath || "";
+  movePickerBlocked = blocked;
+  return new Promise((resolve) => {
+    movePickerResolve = resolve;
+    $("move-error").textContent = "";
+    $("move-modal").classList.remove("hidden");
+    renderMovePicker();
+  });
+}
+
+function closeMovePicker(result) {
+  $("move-modal").classList.add("hidden");
+  if (movePickerResolve) {
+    const done = movePickerResolve;
+    movePickerResolve = null;
+    done(result);
+  }
+}
+
+function isBlockedDest(path) {
+  return movePickerBlocked.some((b) => path === b || path.startsWith(b + "/"));
+}
+
+async function renderMovePicker() {
+  // 브레드크럼: 저장소 최상위 → 현재 경로의 각 단계
+  const crumb = $("move-breadcrumb");
+  crumb.innerHTML = "";
+  const sp = spacesById[currentSpace];
+  const rootLink = document.createElement("a");
+  rootLink.textContent = currentSpace === "home" ? "🏠 내 파일" : `💾 ${sp ? sp.name : currentSpace}`;
+  rootLink.addEventListener("click", () => { movePickerPath = ""; renderMovePicker(); });
+  crumb.appendChild(rootLink);
+
+  const parts = movePickerPath ? movePickerPath.split("/") : [];
+  let acc = "";
+  parts.forEach((part, i) => {
+    acc = acc ? `${acc}/${part}` : part;
+    const sep = document.createElement("span");
+    sep.className = "sep";
+    sep.textContent = "›";
+    crumb.appendChild(sep);
+    if (i === parts.length - 1) {
+      const cur = document.createElement("span");
+      cur.className = "current";
+      cur.textContent = part;
+      crumb.appendChild(cur);
+    } else {
+      const link = document.createElement("a");
+      link.textContent = part;
+      const target = acc;
+      link.addEventListener("click", () => { movePickerPath = target; renderMovePicker(); });
+      crumb.appendChild(link);
+    }
+  });
+
+  // 목적지가 선택 폴더 자신/하위면 이동 불가 → 확인 버튼 잠금
+  $("move-confirm").disabled = isBlockedDest(movePickerPath);
+
+  const list = $("move-list");
+  list.innerHTML = '<div class="empty">불러오는 중…</div>';
+  $("move-error").textContent = "";
+  try {
+    const data = await api(fileUrl("list", movePickerPath));
+    const folders = data.entries.filter((e) => e.is_dir);
+    list.innerHTML = "";
+    if (!folders.length) {
+      list.innerHTML = '<div class="empty">하위 폴더가 없습니다</div>';
+      return;
+    }
+    for (const f of folders) {
+      const btn = document.createElement("button");
+      btn.className = "mf";
+      const cannot = isBlockedDest(f.path);
+      btn.textContent = "📁 " + f.name + (cannot ? "  (이동 대상)" : "");
+      btn.disabled = cannot;
+      if (!cannot) {
+        btn.addEventListener("click", () => { movePickerPath = f.path; renderMovePicker(); });
+      }
+      list.appendChild(btn);
+    }
+  } catch (err) {
+    list.innerHTML = "";
+    $("move-error").textContent = err.message;
+  }
+}
+
+$("move-confirm").addEventListener("click", () => {
+  if (isBlockedDest(movePickerPath)) return;
+  closeMovePicker(movePickerPath);
+});
+$("move-cancel").addEventListener("click", () => closeMovePicker(null));
+$("move-backdrop").addEventListener("click", () => closeMovePicker(null));
 
 function bulkDownload() {
   const files = [...selection]
@@ -674,6 +777,11 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!$("preview-modal").classList.contains("hidden")) {
     closePreview();
+    return;
+  }
+  // 이동 모달은 대기 중인 프로미스가 있으므로 취소로 처리해 확실히 resolve한다.
+  if (!$("move-modal").classList.contains("hidden")) {
+    closeMovePicker(null);
     return;
   }
   document.querySelectorAll(".modal:not(.hidden)").forEach((m) => m.classList.add("hidden"));

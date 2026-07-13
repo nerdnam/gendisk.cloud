@@ -524,6 +524,32 @@ body.dragging #drop-hint { display: block; }
 .qr-status.ok { color: var(--success); font-weight: 600; }
 .qr-card .modal-actions { justify-content: center; }
 
+/* ---------- 이동 위치 선택 ---------- */
+.move-crumb {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px;
+  font-size: 13px; margin-bottom: 10px;
+}
+.move-crumb a { color: var(--accent); text-decoration: none; padding: 2px 6px; border-radius: 6px; cursor: pointer; }
+.move-crumb a:hover { background: var(--hover-bg); }
+.move-crumb .sep { color: var(--muted); }
+.move-crumb .current { color: var(--text); font-weight: 600; padding: 2px 6px; }
+.move-list {
+  max-height: 44vh; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: var(--radius);
+}
+.move-list .mf {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; text-align: left;
+  padding: 10px 12px;
+  border: none; border-bottom: 1px solid var(--border);
+  background: transparent; color: var(--text);
+  font-size: 14px; cursor: pointer;
+}
+.move-list .mf:last-child { border-bottom: none; }
+.move-list .mf:hover:not(:disabled) { background: var(--hover-bg); }
+.move-list .mf:disabled { color: var(--muted); cursor: not-allowed; opacity: .55; }
+.move-list .empty { padding: 14px 12px; color: var(--muted); font-size: 13px; }
+
 /* ---------- 미리보기 ---------- */
 #preview-modal { position: fixed; inset: 0; z-index: 100; }
 .preview-backdrop { position: absolute; inset: 0; background: rgba(10, 14, 22, .8); }

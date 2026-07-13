@@ -170,6 +170,22 @@
   </div>
 </div>
 
+<!-- 이동 위치 선택 모달 -->
+<div id="move-modal" class="modal hidden">
+  <div class="modal-backdrop" id="move-backdrop"></div>
+  <div class="modal-card">
+    <h2>📁 이동할 위치 선택</h2>
+    <p class="qr-desc">폴더를 눌러 들어가고, <strong>[여기로 이동]</strong>으로 현재 폴더에 넣습니다.</p>
+    <nav id="move-breadcrumb" class="move-crumb"></nav>
+    <div id="move-list" class="move-list"></div>
+    <p id="move-error" class="auth-error"></p>
+    <div class="modal-actions">
+      <button type="button" id="move-cancel" class="btn">취소</button>
+      <button type="button" id="move-confirm" class="btn primary">여기로 이동</button>
+    </div>
+  </div>
+</div>
+
 <!-- 미리보기 모달 -->
 <div id="preview-modal" class="hidden">
   <div class="preview-backdrop"></div>
