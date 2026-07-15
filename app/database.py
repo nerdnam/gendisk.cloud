@@ -63,6 +63,28 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 expires_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS shares (
+                -- 외부 공유 링크 (읽기 전용). token 은 공개 URL(/s/<token>)에 들어가는
+                -- 추측 불가한 무작위 값. space/path 는 "생성 시점 소유자 기준" 위치.
+                token TEXT PRIMARY KEY,
+                owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                space TEXT NOT NULL,
+                path TEXT NOT NULL,               -- space 루트 기준 상대경로 (파일 또는 폴더)
+                is_dir INTEGER NOT NULL,
+                password_hash TEXT,               -- NULL = 비밀번호 없음
+                salt TEXT,                        -- password_hash 있을 때만
+                expires_at TEXT,                  -- NULL = 무기한 (ISO8601 UTC)
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_access_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_id);
+            CREATE TABLE IF NOT EXISTS share_unlocks (
+                -- 비밀번호 공유를 푼 뒤 발급되는 단기 접근 토큰 (httponly 쿠키에 저장).
+                -- 공유가 지워지면 함께 삭제된다.
+                access_token TEXT PRIMARY KEY,
+                share_token TEXT NOT NULL REFERENCES shares(token) ON DELETE CASCADE,
+                expires_at TEXT NOT NULL
+            );
             """
         )
         # 구버전 DB 마이그레이션: 누락된 컬럼 추가, 첫 사용자를 관리자로 승격

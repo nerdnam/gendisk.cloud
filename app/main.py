@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import admin, auth, files, sync
+from . import admin, auth, files, shares, sync
 from .database import init_db
 from .webdav import DAV_METHODS, webdav_endpoint
 
@@ -21,6 +21,8 @@ app.include_router(auth.router)
 app.include_router(files.router)
 app.include_router(admin.router)
 app.include_router(sync.router)
+app.include_router(shares.router)
+app.include_router(shares.public_router)
 
 # WebDAV: /dav 및 그 하위 경로를 모든 WebDAV 메서드로 처리
 app.add_route("/dav", webdav_endpoint, methods=DAV_METHODS)
@@ -32,6 +34,12 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.get("/", include_in_schema=False)
 def index():
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/s/{token}", include_in_schema=False)
+def share_page(token: str):
+    """외부 공유 링크의 공개 열람 페이지. 실제 검증/열람은 페이지 JS가 API로 수행."""
+    return FileResponse(STATIC_DIR / "share.html")
 
 
 def _win_client_path():

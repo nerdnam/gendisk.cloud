@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>genDISK 공유</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☁️</text></svg>">
+  <script>
+    // 다크/라이트 테마를 본문 렌더 전에 적용해 깜빡임(FOUC)을 막는다.
+    (function () {
+      try {
+        var t = localStorage.getItem('ncloud_theme');
+        var dark = t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+
+<header class="share-header">
+  <div class="brand">☁️ genDISK</div>
+  <button id="theme-btn" class="btn subtle" title="다크 모드 전환" aria-label="다크 모드 전환">🌙</button>
+</header>
+
+<main class="share-main">
+  <!-- 로딩 -->
+  <div id="share-loading" class="share-state">불러오는 중…</div>
+
+  <!-- 오류 (없음/만료 등) -->
+  <div id="share-error" class="share-state hidden"></div>
+
+  <!-- 비밀번호 잠금 -->
+  <div id="share-lock" class="hidden">
+    <div class="lock-card">
+      <div class="lock-emoji">🔒</div>
+      <h2>비밀번호가 필요합니다</h2>
+      <p class="lock-desc">이 공유 링크는 비밀번호로 보호되어 있습니다.</p>
+      <form id="lock-form">
+        <input type="password" id="lock-pw" placeholder="비밀번호" autocomplete="off" required>
+        <button type="submit" class="btn primary">열기</button>
+      </form>
+      <p id="lock-error" class="auth-error"></p>
+    </div>
+  </div>
+
+  <!-- 내용 -->
+  <div id="share-content" class="hidden">
+    <div class="share-titlebar">
+      <div class="share-title">
+        <span id="share-title-icon">📁</span>
+        <span id="share-title-name"></span>
+      </div>
+      <a id="share-file-download" class="btn primary hidden">⬇ 다운로드</a>
+    </div>
+
+    <nav id="share-crumb" class="share-crumb hidden"></nav>
+
+    <!-- 폴더 목록 -->
+    <div id="share-list" class="share-list-grid"></div>
+    <div id="share-empty" class="share-state hidden">폴더가 비어 있습니다</div>
+
+    <!-- 단일 파일 미리보기 -->
+    <div id="share-file" class="share-file hidden"></div>
+  </div>
+
+  <p class="share-footer">genDISK — 개인 클라우드 저장소</p>
+</main>
+
+<!-- 미리보기 모달 -->
+<div id="preview-modal" class="hidden">
+  <div class="preview-backdrop"></div>
+  <div class="preview-body">
+    <div class="preview-top">
+      <span id="preview-name"></span>
+      <div>
+        <a id="preview-download" class="btn subtle" href="#">다운로드</a>
+        <button id="preview-close" class="btn subtle">✕ 닫기</button>
+      </div>
+    </div>
+    <div id="preview-content"></div>
+  </div>
+</div>
+
+<script src="/static/share.js"></script>
+</body>
+</html>

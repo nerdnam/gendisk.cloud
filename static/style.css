@@ -579,3 +579,101 @@ body.dragging #drop-hint { display: block; }
   border-radius: 8px;
 }
 #preview-content audio { width: min(480px, 90%); }
+
+/* ========== 외부 공유 ========== */
+
+/* --- 공유 만들기 모달 --- */
+.share-field { display: block; margin-bottom: 12px; }
+.share-field > span { display: block; font-size: 13px; color: var(--muted); margin-bottom: 5px; }
+.share-field input, .share-field select {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  padding: 9px 11px;
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+.share-field input:focus, .share-field select:focus { outline: 2px solid var(--accent); border-color: transparent; }
+.share-link-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.share-link-row input {
+  flex: 1; min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--subtle-bg);
+  color: var(--text);
+  padding: 9px 11px;
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+.share-result-meta { font-size: 13px; color: var(--muted); }
+
+/* --- 내 공유 관리 --- */
+#shares-list { display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow-y: auto; }
+.share-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  flex-wrap: wrap;
+}
+.share-row-info { min-width: 0; flex: 1; }
+.share-row-name { font-weight: 600; word-break: break-all; }
+.share-row-badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+.share-badge {
+  font-size: 11px; padding: 2px 7px; border-radius: 999px;
+  background: var(--subtle-bg); color: var(--muted);
+}
+.share-badge-pw { background: var(--active-bg); color: var(--accent); }
+.share-badge-expired { background: rgba(217,72,72,.15); color: var(--danger); }
+.share-row-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.share-row-actions .del:hover { color: var(--danger); }
+
+/* --- 공개 공유 페이지 (/s/<token>) --- */
+.share-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+}
+.share-main { max-width: 1100px; margin: 0 auto; padding: 20px 24px 60px; }
+.share-state { text-align: center; color: var(--muted); padding: 60px 20px; font-size: 15px; }
+.share-titlebar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin: 12px 0 16px; flex-wrap: wrap;
+}
+.share-title { display: flex; align-items: center; gap: 8px; font-size: 20px; font-weight: 700; word-break: break-all; }
+.share-crumb { font-size: 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 14px; }
+.share-crumb a { color: var(--accent); text-decoration: none; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+.share-crumb a:hover { background: var(--active-bg); }
+.share-crumb .sep { color: var(--muted); }
+.share-crumb .current { color: var(--text); font-weight: 600; padding: 4px 6px; }
+.share-list-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 14px;
+}
+.share-file { display: flex; justify-content: center; padding: 10px 0 30px; }
+.file-card {
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px; max-width: 100%; box-shadow: var(--shadow-sm);
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+}
+.file-card img, .file-card video { max-width: 100%; max-height: 70vh; border-radius: 8px; }
+.file-card audio { width: min(480px, 80vw); }
+.file-card-icon { font-size: 64px; }
+.file-card-hint { color: var(--muted); font-size: 13px; text-align: center; }
+.lock-card {
+  max-width: 380px; margin: 60px auto; text-align: center;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 32px 28px; box-shadow: var(--shadow-md);
+}
+.lock-emoji { font-size: 44px; margin-bottom: 8px; }
+.lock-card h2 { font-size: 18px; margin-bottom: 6px; }
+.lock-desc { color: var(--muted); font-size: 14px; margin-bottom: 18px; }
+.lock-card input {
+  width: 100%; border: 1px solid var(--border); background: var(--card); color: var(--text);
+  padding: 10px 12px; border-radius: var(--radius); font-size: 14px; margin-bottom: 12px;
+}
+.lock-card input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+.lock-card button { width: 100%; }
+.share-footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 40px; }

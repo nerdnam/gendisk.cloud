@@ -45,6 +45,7 @@
       <button id="admin-btn" class="btn subtle hidden">👥 사용자 관리</button>
       <button id="storage-btn" class="btn subtle hidden">💾 외부 저장소</button>
       <button id="qr-btn" class="btn subtle">📱 QR 로그인</button>
+      <button id="shares-btn" class="btn subtle">🔗 내 공유</button>
       <button id="pw-btn" class="btn subtle">🔑 비밀번호 변경</button>
       <button id="logout-btn" class="btn subtle">로그아웃</button>
     </div>
@@ -81,6 +82,7 @@
         <div class="sel-actions">
           <button id="sel-all" class="btn subtle">전체 선택</button>
           <button id="sel-download" class="btn subtle">⬇ 다운로드</button>
+          <button id="sel-share" class="btn subtle">🔗 공유</button>
           <button id="sel-move" class="btn subtle">📁 이동</button>
           <button id="sel-delete" class="btn subtle">🗑 삭제</button>
           <button id="sel-clear" class="btn subtle">✕ 선택 해제</button>
@@ -182,6 +184,63 @@
     <div class="modal-actions">
       <button type="button" id="move-cancel" class="btn">취소</button>
       <button type="button" id="move-confirm" class="btn primary">여기로 이동</button>
+    </div>
+  </div>
+</div>
+
+<!-- 공유 링크 만들기 모달 -->
+<div id="share-modal" class="modal hidden">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-card">
+    <h2>🔗 링크로 공유</h2>
+    <p class="qr-desc"><strong id="share-target-name"></strong> 을(를) 링크로 공유합니다. 링크를 아는 사람은 로그인 없이 <strong>보기·다운로드</strong>할 수 있습니다.</p>
+
+    <!-- 생성 옵션 -->
+    <div id="share-form">
+      <label class="share-field">
+        <span>비밀번호 (선택)</span>
+        <input type="password" id="share-password" placeholder="비우면 링크만으로 접근" autocomplete="new-password">
+      </label>
+      <label class="share-field">
+        <span>만료</span>
+        <select id="share-expiry">
+          <option value="7">7일 후</option>
+          <option value="30">30일 후</option>
+          <option value="90">90일 후</option>
+          <option value="">무기한</option>
+        </select>
+      </label>
+      <p id="share-create-error" class="auth-error"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>취소</button>
+        <button type="button" id="share-create-btn" class="btn primary">링크 만들기</button>
+      </div>
+    </div>
+
+    <!-- 생성 결과 -->
+    <div id="share-result" class="hidden">
+      <div class="share-link-row">
+        <input type="text" id="share-link" readonly>
+        <button type="button" id="share-copy" class="btn primary">복사</button>
+      </div>
+      <p id="share-result-meta" class="share-result-meta"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>완료</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 내 공유 관리 모달 -->
+<div id="shares-modal" class="modal hidden">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-card wide">
+    <h2>🔗 내 공유</h2>
+    <p class="qr-desc">내가 만든 공유 링크 목록입니다. 링크를 복사하거나 해제할 수 있습니다.</p>
+    <div id="shares-list"></div>
+    <p id="shares-empty" class="share-state hidden">아직 만든 공유가 없습니다.</p>
+    <div class="modal-actions">
+      <button type="button" class="btn" data-close>닫기</button>
     </div>
   </div>
 </div>

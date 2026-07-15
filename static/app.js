@@ -406,6 +406,12 @@ function renderEntries(entries) {
       dl.onclick = (e) => e.stopPropagation();
       actions.appendChild(dl);
     }
+    // 공유는 읽기 전용 저장소에서도 가능(외부 사용자에게 다운로드 링크 제공)
+    const sh = document.createElement("button");
+    sh.textContent = "🔗";
+    sh.title = "공유 링크 만들기";
+    sh.onclick = (e) => { e.stopPropagation(); openShareModal(currentSpace, entry.path, entry.name); };
+    actions.appendChild(sh);
     if (!isReadonly()) {
       const rn = document.createElement("button");
       rn.textContent = "✏";
@@ -448,6 +454,8 @@ function updateSelectionUI() {
     const ro = isReadonly();
     $("sel-move").classList.toggle("hidden", ro);
     $("sel-delete").classList.toggle("hidden", ro);
+    // 공유는 한 번에 한 항목만 (읽기 전용에서도 허용)
+    $("sel-share").classList.toggle("hidden", n !== 1);
     const allSelected = currentEntries.length > 0 && currentEntries.every((e) => selection.has(e.path));
     $("sel-all").textContent = allSelected ? "전체 해제" : "전체 선택";
   }
@@ -632,8 +640,164 @@ function bulkDownload() {
 $("sel-all").addEventListener("click", toggleSelectAll);
 $("sel-clear").addEventListener("click", clearSelection);
 $("sel-download").addEventListener("click", bulkDownload);
+$("sel-share").addEventListener("click", shareSelected);
 $("sel-move").addEventListener("click", bulkMove);
 $("sel-delete").addEventListener("click", bulkDelete);
+
+function shareSelected() {
+  if (selection.size !== 1) return;
+  const path = [...selection][0];
+  const entry = currentEntries.find((e) => e.path === path);
+  openShareModal(currentSpace, path, entry ? entry.name : path.split("/").pop());
+}
+
+/* ---------- 외부 공유 링크 ---------- */
+let shareTarget = null;   // {space, path, name}
+
+function shareUrl(token) {
+  return `${location.origin}/s/${token}`;
+}
+
+function openShareModal(space, path, name) {
+  shareTarget = { space, path, name };
+  $("share-target-name").textContent = name;
+  $("share-password").value = "";
+  $("share-expiry").value = "7";
+  $("share-create-error").textContent = "";
+  $("share-form").classList.remove("hidden");
+  $("share-result").classList.add("hidden");
+  $("share-modal").classList.remove("hidden");
+}
+
+$("share-create-btn").addEventListener("click", async () => {
+  if (!shareTarget) return;
+  $("share-create-error").textContent = "";
+  const password = $("share-password").value;
+  const expVal = $("share-expiry").value;
+  const body = { space: shareTarget.space, path: shareTarget.path };
+  if (password) body.password = password;
+  if (expVal) body.expires_days = parseInt(expVal, 10);
+  try {
+    const data = await postJSON("/api/shares/create", body);
+    const link = shareUrl(data.token);
+    $("share-link").value = link;
+    const bits = [data.is_dir ? "폴더" : "파일"];
+    if (data.protected) bits.push("🔒 비밀번호 보호");
+    bits.push(data.expires_at ? `${new Date(data.expires_at).toLocaleDateString("ko-KR")} 만료` : "무기한");
+    $("share-result-meta").textContent = bits.join(" · ");
+    $("share-form").classList.add("hidden");
+    $("share-result").classList.remove("hidden");
+  } catch (err) {
+    $("share-create-error").textContent = err.message;
+  }
+});
+
+$("share-copy").addEventListener("click", () => copyText($("share-link").value, $("share-copy")));
+
+async function copyText(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // clipboard API 불가 시 폴백
+    const inp = $("share-link");
+    inp.focus(); inp.select();
+    try { document.execCommand("copy"); } catch {}
+  }
+  if (btn) {
+    const old = btn.textContent;
+    btn.textContent = "복사됨 ✓";
+    setTimeout(() => { btn.textContent = old; }, 1500);
+  }
+}
+
+/* ---------- 내 공유 관리 ---------- */
+$("shares-btn").addEventListener("click", openSharesModal);
+
+async function openSharesModal() {
+  $("shares-modal").classList.remove("hidden");
+  await loadSharesList();
+}
+
+async function loadSharesList() {
+  const list = $("shares-list");
+  list.innerHTML = '<p class="share-state">불러오는 중…</p>';
+  let data;
+  try {
+    data = await api("/api/shares/list");
+  } catch (err) {
+    list.innerHTML = `<p class="auth-error">${err.message}</p>`;
+    return;
+  }
+  list.innerHTML = "";
+  $("shares-empty").classList.toggle("hidden", data.shares.length > 0);
+  for (const s of data.shares) {
+    list.appendChild(shareRow(s));
+  }
+}
+
+function shareRow(s) {
+  const row = document.createElement("div");
+  row.className = "share-row";
+
+  const info = document.createElement("div");
+  info.className = "share-row-info";
+  const title = document.createElement("div");
+  title.className = "share-row-name";
+  title.textContent = `${s.is_dir ? "📁" : "📄"} ${s.name}`;
+  info.appendChild(title);
+
+  const badges = document.createElement("div");
+  badges.className = "share-row-badges";
+  const spaceLabel = s.space === "home" ? "내 파일" : s.space;
+  badges.appendChild(badge(spaceLabel, "space"));
+  if (s.protected) badges.appendChild(badge("🔒 비밀번호", "pw"));
+  if (s.expired) badges.appendChild(badge("만료됨", "expired"));
+  else if (s.expires_at) badges.appendChild(badge(`${new Date(s.expires_at).toLocaleDateString("ko-KR")} 만료`, "exp"));
+  else badges.appendChild(badge("무기한", "exp"));
+  info.appendChild(badges);
+  row.appendChild(info);
+
+  const actions = document.createElement("div");
+  actions.className = "share-row-actions";
+  const copy = document.createElement("button");
+  copy.className = "btn subtle";
+  copy.textContent = "🔗 복사";
+  copy.title = shareUrl(s.token);
+  copy.addEventListener("click", () => copyText(shareUrl(s.token), copy));
+  actions.appendChild(copy);
+  const open = document.createElement("a");
+  open.className = "btn subtle";
+  open.textContent = "↗ 열기";
+  open.href = shareUrl(s.token);
+  open.target = "_blank";
+  open.rel = "noopener";
+  actions.appendChild(open);
+  const rev = document.createElement("button");
+  rev.className = "btn subtle del";
+  rev.textContent = "🗑 해제";
+  rev.addEventListener("click", () => revokeShare(s.token, s.name));
+  actions.appendChild(rev);
+  row.appendChild(actions);
+  return row;
+}
+
+function badge(text, kind) {
+  const b = document.createElement("span");
+  b.className = `share-badge share-badge-${kind}`;
+  b.textContent = text;
+  return b;
+}
+
+async function revokeShare(token, name) {
+  if (!confirm(`'${name}' 공유를 해제할까요? 이 링크는 더 이상 열리지 않습니다.`)) return;
+  try {
+    await postJSON("/api/shares/revoke", { token });
+  } catch (err) {
+    alert(err.message);
+    return;
+  }
+  await loadSharesList();
+}
 
 /* ---------- 폴더 생성 / 이름 변경 / 삭제 ---------- */
 $("mkdir-btn").addEventListener("click", async () => {
