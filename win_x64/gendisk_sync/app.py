@@ -172,6 +172,7 @@ class App:
         # macOS 앱과 동일: 로그인돼 있으면 설정 화면, 아니면 로그인 화면부터.
         if self.cfg.token:
             self._show_settings()
+            self._refresh_spaces_async()   # 저장된 토큰으로 시작 시 저장소 목록 채우기
         else:
             self._show_login()
 
@@ -346,15 +347,17 @@ class App:
             self.lbl_login_error.configure(text=str(e))
 
     def _logout(self):
-        """세션 토큰을 지우고 로그인 화면으로 돌아간다. (서버 주소/아이디는 재로그인용으로 유지)"""
+        """세션을 지우고 로그인 화면으로. 명시적 로그아웃이므로 자동 로그인/저장 비번도 끈다.
+        (서버 주소·아이디는 재로그인 편의를 위해 유지)"""
         self._collect()
         self.cfg.token = ""
         self._pw = ""
+        # 명시적 로그아웃 → 다음 실행에서 자동 로그인하지 않고, 저장된 비번도 제거
+        self.cfg.auto_login = False
+        self.var_autologin.set(False)
+        self.cfg.clear_password()
         self.cfg.save()
-        # 로그인 필드 프리필 갱신
-        self.e_pw.delete(0, "end")
-        if self.cfg.get_password():
-            self.e_pw.insert(0, self.cfg.get_password())
+        self.e_pw.delete(0, "end")   # 저장 비번을 지웠으니 프리필도 비움
         self.lbl_login_error.configure(text="")
         self._show_login()
 
@@ -369,6 +372,7 @@ class App:
             self._pw = pw
             cfg.save()
             self.root.after(0, self._show_settings)
+            self.root.after(0, self._refresh_spaces_async)
             self.set_status("자동 로그인 성공", SUCCESS)
             self.log("자동 로그인 성공")
         except Exception as e:
@@ -406,6 +410,22 @@ class App:
                 self.cmb_space.set(spaces[0] if spaces else "home")
         except Exception:
             pass
+
+    def _refresh_spaces_async(self):
+        """저장된 토큰으로 시작했을 때 저장소 목록을 백그라운드에서 채운다(네트워크는 스레드에서)."""
+        if not (self.cfg.server_url and self.cfg.token):
+            return
+        def work():
+            try:
+                spaces = [s["id"] for s in GenDiskClient(self.cfg.server_url, self.cfg.token).spaces()]
+            except Exception:
+                return
+            def apply():
+                self.cmb_space.configure(values=spaces or ["home"])
+                if self.cfg.space not in spaces:
+                    self.cmb_space.set(spaces[0] if spaces else "home")
+            self.root.after(0, apply)   # 위젯 갱신은 메인 스레드에서
+        threading.Thread(target=work, daemon=True).start()
 
     def _pick_folder(self):
         d = filedialog.askdirectory()
