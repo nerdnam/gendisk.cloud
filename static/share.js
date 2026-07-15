@@ -41,6 +41,9 @@ function dlUrl(relPath) {
 function rawUrl(relPath) {
   return `${API}/raw?path=${encodeURIComponent(relPath)}`;
 }
+function thumbUrl(relPath) {
+  return `${API}/thumb?path=${encodeURIComponent(relPath)}`;
+}
 
 async function apiGet(url) {
   const res = await fetch(url);
@@ -170,18 +173,26 @@ async function browse(path) {
   curPath = path;
   const grid = $("share-list");
   grid.innerHTML = "";
+  document.querySelectorAll(".share-trunc-note").forEach((n) => n.remove());
   hide("share-empty");
   let data;
   try {
     data = await apiGet(`${API}/list?path=${encodeURIComponent(path)}`);
   } catch (err) {
     if (err.status === 401) { location.reload(); return; } // 언락 만료 → 다시 로드
+    if (err.status === 410) { fatal("만료된 공유 링크입니다."); return; }
     fatal(err.message); return;
   }
   renderCrumb(data.path);
   if (!data.entries.length) { show("share-empty"); return; }
   for (const entry of data.entries) {
     grid.appendChild(entryCard(entry));
+  }
+  if (data.truncated) {
+    const note = document.createElement("div");
+    note.className = "share-trunc-note";
+    note.textContent = `항목이 많아 처음 ${data.entries.length.toLocaleString("ko-KR")}개만 표시합니다.`;
+    grid.after(note);
   }
   show("share-list");
 }
@@ -224,7 +235,7 @@ function entryCard(entry) {
   if (entry.kind === "image") {
     const img = document.createElement("img");
     img.loading = "lazy";
-    img.src = rawUrl(entry.path);
+    img.src = thumbUrl(entry.path);   // 원본이 아닌 서버 생성 썸네일(대역폭 절약)
     img.onerror = () => { icon.textContent = KIND_ICONS.image; };
     icon.appendChild(img);
   } else {

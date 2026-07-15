@@ -8,26 +8,43 @@
   * token 은 secrets.token_urlsafe(32) — 추측 불가.
   * 공개 열람 시에도 소유자의 신원으로 space 를 다시 확인하므로, 마운트 접근이
     회수되거나 소유자가 삭제되면 링크도 죽는다(404).
-  * 경로는 항상 공유 루트 하위로 가둔다(디렉토리 트래버설 차단).
-  * 절대 상위(공유 루트 밖)를 노출하지 않는다 — entry 의 path 는 공유 루트 기준 상대경로.
+  * 경로는 항상 공유 루트 하위로 가둔다(디렉토리 트래버설 차단). 심볼릭 링크는
+    목록/제공 모두에서 배제해 공유 밖을 가리키지 못하게 한다.
+  * 공개 제공(raw/download)은 실행 가능한 타입(html/svg 등)을 절대 인라인하지 않고
+    첨부(attachment)+octet-stream 으로 강제하며 X-Content-Type-Options: nosniff 를 붙인다
+    (같은 오리진 XSS 방지).
+  * 비밀번호 언락은 레이트리밋으로 PBKDF2 CPU 소진/온라인 무차별 대입을 막는다.
 """
+import hashlib
+import io
+import mimetypes
 import os
 import secrets
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from . import files as files_mod
 from .auth import current_user, hash_password
-from .database import get_db
+from .database import THUMBS_DIR, get_db
 
 router = APIRouter(prefix="/api/shares", tags=["shares"])
 public_router = APIRouter(prefix="/api/public/share", tags=["public-share"])
 
 SHARE_COOKIE = "gd_share"
 UNLOCK_HOURS = 12
+MIN_SHARE_PASSWORD = 4
+MAX_LIST_ENTRIES = 20000          # 공개 목록이 무한정 커지지 않도록 상한
+THUMB_SIZE = 256
+
+# 인라인 렌더를 허용할 미디어 접두사. 그 외(html/svg/pdf/txt…)는 첨부로 강제한다.
+_SAFE_INLINE = ("image/", "video/", "audio/")
 
 
 def _utcnow() -> datetime:
@@ -41,6 +58,32 @@ def _cookie_path(token: str) -> str:
 def _base_name(rel_path: str, space: str) -> str:
     name = rel_path.rstrip("/").split("/")[-1]
     return name or space
+
+
+# ---------- 언락 레이트리밋 (인메모리) ----------
+# 비밀번호 언락은 요청마다 PBKDF2(30만 회)를 돌리므로, 인증 없는 공개 엔드포인트에서
+# 무제한 호출되면 CPU/스레드풀을 소진시키거나 약한 비밀번호를 무차별 대입할 수 있다.
+_rl_lock = threading.Lock()
+_rl: dict[str, list[float]] = {}
+
+
+def _rl_hit(key: str, maxn: int, window: float) -> bool:
+    """key 버킷에 이번 시도를 기록하고, window 초 내 maxn 이하이면 True(허용)."""
+    now = time.monotonic()
+    with _rl_lock:
+        times = [t for t in _rl.get(key, ()) if now - t < window]
+        allowed = len(times) < maxn
+        if allowed:
+            times.append(now)
+        _rl[key] = times
+        return allowed
+
+
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 # ---------- 공유 조회/검증 헬퍼 ----------
@@ -77,7 +120,7 @@ def _share_root_path(share) -> Path:
     # 재확인: 공유 루트는 반드시 space 루트 하위여야 한다
     if root != base and base not in root.parents:
         raise HTTPException(404, "공유를 찾을 수 없습니다")
-    if not root.exists():
+    if not root.exists() or root.is_symlink():
         raise HTTPException(404, "공유 대상이 더 이상 존재하지 않습니다")
     return root
 
@@ -108,8 +151,10 @@ def _is_unlocked(conn, request: Request, token: str, share) -> bool:
 def _require_access(conn, request: Request, token: str):
     """유효한 공유인지(존재·미만료·필요시 언락) 확인하고 (share, root) 반환."""
     share = _get_share(conn, token)
-    if share is None or _expired(share):
+    if share is None:
         raise HTTPException(404, "공유를 찾을 수 없습니다")
+    if _expired(share):
+        raise HTTPException(410, "만료된 공유입니다")
     if share["password_hash"] and not _is_unlocked(conn, request, token, share):
         raise HTTPException(401, "비밀번호가 필요합니다")
     root = _share_root_path(share)
@@ -117,15 +162,57 @@ def _require_access(conn, request: Request, token: str):
 
 
 def _touch(token: str) -> None:
-    conn = get_db()
+    """마지막 접근 시각 기록(부가 정보). 실패(락 등)해도 요청을 깨뜨리지 않는다."""
     try:
-        conn.execute(
-            "UPDATE shares SET last_access_at = ? WHERE token = ?",
-            (_utcnow().isoformat(), token),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+        conn = get_db()
+        try:
+            conn.execute(
+                "UPDATE shares SET last_access_at = ? WHERE token = ?",
+                (_utcnow().isoformat(), token),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass  # 접근 기록은 실패해도 무시 (다운로드/목록 응답을 500으로 만들지 않기 위해)
+
+
+def _public_serve(target: Path, download: bool) -> FileResponse:
+    """공개 제공용 파일 응답. 실행 가능한 타입은 인라인하지 않는다 (같은 오리진 XSS 방지)."""
+    media = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    # 인라인은 실제 미디어(래스터 이미지/영상/오디오)만. svg 는 스크립트를 품을 수 있어 제외.
+    inline_ok = (not download) and media.startswith(_SAFE_INLINE) and media != "image/svg+xml"
+    disposition = "inline" if inline_ok else "attachment"
+    serve_media = media if inline_ok else "application/octet-stream"
+    headers = {
+        "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(target.name)}",
+        "X-Content-Type-Options": "nosniff",
+    }
+    return FileResponse(target, media_type=serve_media, headers=headers)
+
+
+def drop_shares_for(owner_id: int, space: str, path: str) -> None:
+    """대상 파일/폴더가 삭제·이름변경·이동될 때 그 경로(및 하위)의 공유를 제거한다.
+
+    경로 문자열에 묶인 공유가 삭제 후 같은 경로에 생긴 다른 파일을 가리키는 것을 막는다.
+    (home 저장소는 사용자별이라 owner_id 로 스코프해야 다른 사용자의 동일 상대경로 공유를
+    잘못 지우지 않는다.)
+    """
+    rel = (path or "").strip("/").replace("\\", "/")
+    if not rel:
+        return
+    try:
+        conn = get_db()
+        try:
+            conn.execute(
+                "DELETE FROM shares WHERE owner_id = ? AND space = ? AND (path = ? OR path LIKE ?)",
+                (owner_id, space, rel, rel + "/%"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass  # 정리는 최선노력 — 실패해도 삭제/이동 자체는 성공시킨다
 
 
 # ---------- 소유자용 (로그인 필요) ----------
@@ -152,6 +239,8 @@ def create_share(body: ShareCreate, user: dict = Depends(current_user)):
     token = secrets.token_urlsafe(32)
     password_hash = salt = None
     if body.password:
+        if len(body.password) < MIN_SHARE_PASSWORD:
+            raise HTTPException(400, f"비밀번호는 {MIN_SHARE_PASSWORD}자 이상이어야 합니다")
         salt = secrets.token_hex(16)
         password_hash = hash_password(body.password, salt)
     expires_at = None
@@ -248,8 +337,10 @@ def share_meta(token: str, request: Request):
     finally:
         conn.close()
     resp = {"protected": protected, "unlocked": unlocked, "expires_at": share["expires_at"]}
-    # 비밀번호가 걸려 있고 아직 안 풀렸으면 이름/종류조차 노출하지 않는다
+    # 비밀번호가 걸려 있고 아직 안 풀렸으면 이름/종류조차 노출하지 않는다.
+    # 노출 전에는 소유자 접근권/대상 존재를 재확인해 죽은 공유는 이름도 안 준다.
     if unlocked or not protected:
+        _share_root_path(share)  # 접근 불가/대상 소멸이면 404 로 끝남
         resp["name"] = _base_name(share["path"], share["space"])
         resp["is_dir"] = bool(share["is_dir"])
     return resp
@@ -260,13 +351,24 @@ def share_unlock(token: str, body: UnlockBody, request: Request, response: Respo
     conn = get_db()
     try:
         share = _get_share(conn, token)
-        if share is None or _expired(share):
+        if share is None:
             raise HTTPException(404, "공유를 찾을 수 없습니다")
+        if _expired(share):
+            raise HTTPException(410, "만료된 공유입니다")
         if not share["password_hash"]:
             return {"ok": True}  # 비밀번호 없는 공유 — 언락 불필요
+
+        # 레이트리밋: 해시 계산 전에 IP·토큰 단위로 시도 횟수를 제한한다
+        ip = _client_ip(request)
+        if not _rl_hit(f"ip:{ip}:{token}", 5, 60.0) or not _rl_hit(f"tok:{token}", 20, 60.0):
+            raise HTTPException(429, "시도가 너무 많습니다. 잠시 후 다시 시도하세요.")
+
         attempt = hash_password(body.password, share["salt"])
         if not secrets.compare_digest(share["password_hash"], attempt):
             raise HTTPException(401, "비밀번호가 올바르지 않습니다")
+
+        # 만료된 언락 토큰 정리 (테이블 무한 증가 방지)
+        conn.execute("DELETE FROM share_unlocks WHERE expires_at < ?", (_utcnow().isoformat(),))
         access = secrets.token_urlsafe(32)
         exp = _utcnow() + timedelta(hours=UNLOCK_HOURS)
         if share["expires_at"]:
@@ -301,32 +403,40 @@ def share_list(token: str, request: Request, path: str = ""):
     target = _resolve_within(root, path)
     if not target.is_dir():
         raise HTTPException(404, "폴더를 찾을 수 없습니다")
+
     entries = []
+    truncated = False
     try:
         with os.scandir(target) as it:
-            dirents = list(it)
+            for de in it:
+                # 공유 밖을 가리킬 수 있는 심볼릭 링크는 노출하지 않는다
+                if de.is_symlink():
+                    continue
+                if len(entries) >= MAX_LIST_ENTRIES:
+                    truncated = True
+                    break
+                try:
+                    entries.append(files_mod.entry_info(Path(de.path), root))
+                except OSError:
+                    continue  # stat 불가 항목은 조용히 건너뜀 (공개 페이지라 최소 노출)
     except OSError as exc:
         raise files_mod._fs_error(exc)
-    for de in dirents:
-        try:
-            entries.append(files_mod.entry_info(Path(de.path), root))
-        except OSError:
-            continue  # stat 불가 항목은 조용히 건너뜀 (공개 페이지라 최소 노출)
     entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
     _touch(token)
     return {
         "name": root.name,
         "path": target.relative_to(root).as_posix() if target != root else "",
         "entries": entries,
+        "truncated": truncated,
     }
 
 
-def _served_file(share, root: Path, path: str, download: bool):
+def _share_target(share, root: Path, path: str) -> Path:
     # 파일 공유면 path 무시(대상은 root 자체), 폴더 공유면 하위 파일을 가리켜야 한다
     target = _resolve_within(root, path) if bool(share["is_dir"]) else root
-    if not target.is_file():
+    if target.is_symlink() or not target.is_file():
         raise HTTPException(404, "파일을 찾을 수 없습니다")
-    return files_mod._serve_file(target, download=download)
+    return target
 
 
 @public_router.get("/{token}/download")
@@ -336,7 +446,8 @@ def share_download(token: str, request: Request, path: str = ""):
         share, root = _require_access(conn, request, token)
     finally:
         conn.close()
-    resp = _served_file(share, root, path, download=True)
+    target = _share_target(share, root, path)
+    resp = _public_serve(target, download=True)
     _touch(token)
     return resp
 
@@ -348,6 +459,42 @@ def share_raw(token: str, request: Request, path: str = ""):
         share, root = _require_access(conn, request, token)
     finally:
         conn.close()
-    resp = _served_file(share, root, path, download=False)
+    target = _share_target(share, root, path)
+    resp = _public_serve(target, download=False)
     _touch(token)
     return resp
+
+
+@public_router.get("/{token}/thumb")
+def share_thumb(token: str, request: Request, path: str = ""):
+    conn = get_db()
+    try:
+        share, root = _require_access(conn, request, token)
+    finally:
+        conn.close()
+    target = _share_target(share, root, path)
+    if files_mod.file_kind(target) != "image":
+        raise HTTPException(404, "썸네일을 만들 수 없습니다")
+    stat = target.stat()
+    rel = path if bool(share["is_dir"]) else ""
+    digest = hashlib.sha256(f"share:{token}\0{rel}".encode()).hexdigest()[:32]
+    cache_file = THUMBS_DIR / f"{digest}_{stat.st_mtime_ns}_{stat.st_size}.webp"
+    if not cache_file.exists():
+        try:
+            from PIL import Image, ImageOps
+
+            with Image.open(target) as im:
+                im = ImageOps.exif_transpose(im)
+                im.thumbnail((THUMB_SIZE, THUMB_SIZE))
+                if im.mode not in ("RGB", "RGBA"):
+                    im = im.convert("RGB")
+                buf = io.BytesIO()
+                im.save(buf, "WEBP", quality=80)
+            cache_file.write_bytes(buf.getvalue())
+        except Exception:
+            raise HTTPException(415, "지원하지 않는 이미지입니다")
+    return Response(
+        cache_file.read_bytes(),
+        media_type="image/webp",
+        headers={"Cache-Control": "public, max-age=3600", "X-Content-Type-Options": "nosniff"},
+    )

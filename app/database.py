@@ -13,9 +13,13 @@ MOUNTS_DIR = Path(os.environ.get("NCLOUD_MOUNTS_DIR", BASE_DIR / "mounts"))
 
 
 def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # 락 대기(공개 공유의 잦은 읽기+접근시각 기록으로 쓰기 경합이 생김)와 동시성 개선.
+    # WAL 은 로컬 볼륨(data/)에서만 유효하며, 한 번 설정되면 DB 파일에 지속된다.
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 

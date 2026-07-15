@@ -677,3 +677,4 @@ body.dragging #drop-hint { display: block; }
 .lock-card input:focus { outline: 2px solid var(--accent); border-color: transparent; }
 .lock-card button { width: 100%; }
 .share-footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 40px; }
+.share-trunc-note { color: var(--muted); font-size: 13px; text-align: center; padding: 16px 0 0; }

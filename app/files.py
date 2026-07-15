@@ -347,6 +347,9 @@ def delete(body: PathBody, user: dict = Depends(current_user)):
             target.unlink()
     except OSError as exc:
         raise _fs_error(exc)
+    # 삭제된 경로(및 하위)에 걸린 공유 링크가 나중에 같은 경로의 다른 파일을 가리키지 않도록 제거
+    from . import shares
+    shares.drop_shares_for(user["id"], body.space, body.path)
     return {"ok": True}
 
 
@@ -367,6 +370,9 @@ def rename(body: RenameBody, user: dict = Depends(current_user)):
         target.rename(dest)
     except OSError as exc:
         raise _fs_error(exc)
+    # 이름이 바뀌면 이전 경로의 공유는 대상을 잃으므로 제거
+    from . import shares
+    shares.drop_shares_for(user["id"], body.space, body.path)
     return {"ok": True}
 
 
@@ -410,6 +416,9 @@ async def move(body: MoveBody, user: dict = Depends(current_user)):
             await run_in_threadpool(_do_move)
         except OSError as exc:
             raise _fs_error(exc)
+    # 이동하면 원래 경로의 공유는 대상을 잃으므로 제거
+    from . import shares
+    shares.drop_shares_for(user["id"], body.space, body.src)
     return {"ok": True, "path": dst.relative_to(root).as_posix()}
 
 
