@@ -1,8 +1,9 @@
 """gendisk-sync GUI: 로그인 · 폴더 동기화 · 드라이브 연결 · 시작 옵션.
 
 customtkinter로 macOS 스타일(둥근 카드·토글 스위치·플랫 강조 버튼·시스템 다크/라이트)
-창을 만들고, 백그라운드 스레드에서 주기적으로 동기화한다. 설정에 따라 시작 시
-자동 로그인 → 드라이브 자동 연결 → 자동 동기화까지 수행한다.
+창을 만든다. macOS 앱과 동일하게 **로그인 화면이 첫 화면**이고, 로그인하면 **설정 화면**으로
+전환된다. 백그라운드 스레드에서 주기적으로 동기화하며, 설정에 따라 시작 시 자동 로그인 →
+드라이브 자동 연결 → 자동 동기화까지 수행한다.
 """
 import threading
 import tkinter as tk
@@ -69,6 +70,8 @@ class SyncWorker(threading.Thread):
 class App:
     def __init__(self, startup: bool = False):
         self.cfg = Config.load()
+        # 이번 세션의 비밀번호(WebDAV 드라이브 연결용). 저장 여부와 무관하게 메모리에 보관.
+        self._pw = self.cfg.get_password()
         self.root = ctk.CTk()
         self.root.title("genDISK")
         self.root.geometry("560x820")
@@ -138,7 +141,7 @@ class App:
                 pass
         self.root.destroy()
 
-    # ---------- UI ----------
+    # ---------- UI 공통 ----------
     def _card(self, parent, title):
         """제목이 붙은 둥근 카드. 내용을 담을 안쪽 프레임을 돌려준다."""
         card = ctk.CTkFrame(parent, corner_radius=12)
@@ -160,52 +163,93 @@ class App:
         self.font_s = ctk.CTkFont(family="Segoe UI", size=12)
         self.font_mono = ctk.CTkFont(family="Consolas", size=12)
 
-        # 헤더
-        header = ctk.CTkFrame(self.root, fg_color="transparent")
-        header.pack(fill="x", padx=22, pady=(18, 6))
-        ctk.CTkLabel(header, text="☁  genDISK", font=self.font_title).pack(side="left")
-        ctk.CTkLabel(header, text="동기화 · 드라이브 연결", font=self.font_s,
-                     text_color=MUTED).pack(side="left", padx=(12, 0), pady=(8, 0))
+        self.container = ctk.CTkFrame(self.root, fg_color="transparent")
+        self.container.pack(fill="both", expand=True)
 
-        # 스크롤 가능한 본문
-        body = ctk.CTkScrollableFrame(self.root, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        self.login_frame = self._build_login(self.container)
+        self.settings_frame = self._build_settings(self.container)
 
-        # ── 연결 ──
-        c = self._card(body, "연결")
-        self._field_label(c, "서버 주소").pack(fill="x")
-        self.e_url = ctk.CTkEntry(c, placeholder_text="https://cloud.example.com")
-        self.e_url.pack(fill="x", pady=(2, 10)); self.e_url.insert(0, self.cfg.server_url)
+        # macOS 앱과 동일: 로그인돼 있으면 설정 화면, 아니면 로그인 화면부터.
+        if self.cfg.token:
+            self._show_settings()
+        else:
+            self._show_login()
 
-        row = ctk.CTkFrame(c, fg_color="transparent"); row.pack(fill="x")
-        left = ctk.CTkFrame(row, fg_color="transparent")
-        left.pack(side="left", fill="x", expand=True)
-        self._field_label(left, "아이디").pack(fill="x")
-        self.e_user = ctk.CTkEntry(left, placeholder_text="아이디")
-        self.e_user.pack(fill="x", pady=(2, 0)); self.e_user.insert(0, self.cfg.username)
-        right = ctk.CTkFrame(row, fg_color="transparent")
-        right.pack(side="left", fill="x", expand=True, padx=(10, 0))
-        self._field_label(right, "비밀번호").pack(fill="x")
-        self.e_pw = ctk.CTkEntry(right, show="•", placeholder_text="비밀번호")
-        self.e_pw.pack(fill="x", pady=(2, 0))
+    def _show_login(self):
+        self.settings_frame.pack_forget()
+        self.login_frame.pack(fill="both", expand=True)
+
+    def _show_settings(self):
+        self.login_frame.pack_forget()
+        self._refresh_account_labels()
+        self.settings_frame.pack(fill="both", expand=True)
+
+    # ---------- 로그인 화면 ----------
+    def _build_login(self, parent):
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        card = ctk.CTkFrame(frame, corner_radius=16)
+        card.place(relx=0.5, rely=0.5, anchor="center")
+        pad = ctk.CTkFrame(card, fg_color="transparent")
+        pad.pack(padx=32, pady=28)
+
+        ctk.CTkLabel(pad, text="☁  genDISK", font=self.font_title).pack()
+        ctk.CTkLabel(pad, text="로그인하고 파일을 동기화·연결하세요",
+                     font=self.font_s, text_color=MUTED).pack(pady=(2, 18))
+
+        self.e_url = ctk.CTkEntry(pad, width=320,
+                                  placeholder_text="서버 주소 (예: https://gendisk.cloud)")
+        self.e_url.pack(pady=4)
+        if self.cfg.server_url:  # 빈 값 insert는 placeholder를 없애므로 값이 있을 때만
+            self.e_url.insert(0, self.cfg.server_url)
+        self.e_user = ctk.CTkEntry(pad, width=320, placeholder_text="아이디")
+        self.e_user.pack(pady=4)
+        if self.cfg.username:
+            self.e_user.insert(0, self.cfg.username)
+        self.e_pw = ctk.CTkEntry(pad, width=320, show="•", placeholder_text="비밀번호")
+        self.e_pw.pack(pady=4)
         if self.cfg.get_password():
             self.e_pw.insert(0, self.cfg.get_password())
+        self.e_pw.bind("<Return>", lambda e: self._login())
 
-        self.btn_login = ctk.CTkButton(c, text="로그인", command=self._login,
+        self.var_savecred = tk.BooleanVar(value=self.cfg.save_credentials)
+        ctk.CTkSwitch(pad, text="로그인 정보 저장 (암호화)",
+                      variable=self.var_savecred).pack(anchor="w", pady=(10, 0))
+
+        self.lbl_login_error = ctk.CTkLabel(pad, text="", font=self.font_s,
+                                            text_color=DANGER, wraplength=320)
+        self.lbl_login_error.pack(pady=(8, 0))
+
+        self.btn_login = ctk.CTkButton(pad, text="로그인", width=320, command=self._login,
                                        fg_color=ACCENT, hover_color=ACCENT_HOVER)
-        self.btn_login.pack(fill="x", pady=(12, 4))
-        self.lbl_login = ctk.CTkLabel(c, text=self._login_state_text(), font=self.font_s,
-                                      text_color=MUTED, anchor="w")
-        self.lbl_login.pack(fill="x")
+        self.btn_login.pack(pady=(8, 0))
+        return frame
+
+    # ---------- 설정 화면 (로그인 후) ----------
+    def _build_settings(self, parent):
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+
+        header = ctk.CTkFrame(frame, fg_color="transparent")
+        header.pack(fill="x", padx=22, pady=(18, 6))
+        ctk.CTkLabel(header, text="☁  genDISK", font=self.font_title).pack(side="left")
+        ctk.CTkButton(header, text="로그아웃", width=88, command=self._logout,
+                      fg_color="transparent", border_width=1,
+                      text_color=DANGER, hover_color=("gray90", "gray25")).pack(side="right")
+
+        body = ctk.CTkScrollableFrame(frame, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        # ── 계정 ──
+        c = self._card(body, "계정")
+        self.lbl_acc_server = self._field_label(c, "")
+        self.lbl_acc_server.pack(fill="x")
+        self.lbl_acc_user = self._field_label(c, "")
+        self.lbl_acc_user.pack(fill="x", pady=(2, 0))
 
         # ── 시작 옵션 ──
         c = self._card(body, "시작 옵션")
-        self.var_savecred = tk.BooleanVar(value=self.cfg.save_credentials)
         self.var_autostart = tk.BooleanVar(value=self.cfg.auto_start)
         self.var_autologin = tk.BooleanVar(value=self.cfg.auto_login)
         self.var_autodrive = tk.BooleanVar(value=self.cfg.auto_connect_drive)
-        ctk.CTkSwitch(c, text="로그인 정보 저장 (암호화)", variable=self.var_savecred).pack(
-            anchor="w", pady=6)
         ctk.CTkSwitch(c, text="Windows 시작 시 자동 실행", variable=self.var_autostart,
                       command=self._apply_autostart).pack(anchor="w", pady=6)
         ctk.CTkSwitch(c, text="프로그램 시작 시 자동 로그인", variable=self.var_autologin).pack(
@@ -223,12 +267,13 @@ class App:
         frow = ctk.CTkFrame(c, fg_color="transparent"); frow.pack(fill="x", pady=(2, 10))
         self.e_folder = ctk.CTkEntry(frow, placeholder_text="C:\\Users\\…")
         self.e_folder.pack(side="left", fill="x", expand=True)
-        self.e_folder.insert(0, self.cfg.local_folder)
+        if self.cfg.local_folder:
+            self.e_folder.insert(0, self.cfg.local_folder)
         ctk.CTkButton(frow, text="찾아보기", width=90, command=self._pick_folder).pack(
             side="left", padx=(8, 0))
 
         irow = ctk.CTkFrame(c, fg_color="transparent"); irow.pack(fill="x")
-        self._field_label(irow, "동기화 주기(초)").pack(side="left", pady=(0, 0))
+        self._field_label(irow, "동기화 주기(초)").pack(side="left")
         self.e_interval = ctk.CTkEntry(irow, width=90)
         self.e_interval.pack(side="left", padx=(10, 0))
         self.e_interval.insert(0, str(self.cfg.interval_sec))
@@ -266,33 +311,52 @@ class App:
         self.txt_log = ctk.CTkTextbox(c, height=150, wrap="word", font=self.font_mono)
         self.txt_log.pack(fill="both", expand=True)
         self.txt_log.configure(state="disabled")
+        return frame
 
-    def _login_state_text(self):
-        return f"로그인됨: {self.cfg.username}" if self.cfg.token else "로그인 필요"
+    def _refresh_account_labels(self):
+        self.lbl_acc_server.configure(text=f"서버   {self.cfg.server_url or '-'}")
+        self.lbl_acc_user.configure(text=f"아이디   {self.cfg.username or '-'}")
 
     # ---------- 동작 ----------
     def _login(self):
-        self._collect()
-        url, user, pw = self.e_url.get().strip(), self.e_user.get().strip(), self.e_pw.get()
+        url = self.e_url.get().strip()
+        user = self.e_user.get().strip()
+        pw = self.e_pw.get()
         if not url or not user or not pw:
-            messagebox.showwarning("입력 필요", "서버 주소·아이디·비밀번호를 모두 입력하세요.")
+            self.lbl_login_error.configure(text="서버 주소·아이디·비밀번호를 모두 입력하세요.")
             return
+        self.lbl_login_error.configure(text="")
+        self.cfg.save_credentials = self.var_savecred.get()
         try:
             c = GenDiskClient(url)
             c.login(user, pw)
             self.cfg.server_url, self.cfg.username, self.cfg.token = url, user, c.token
+            self._pw = pw
             if self.cfg.save_credentials:
                 self.cfg.set_password(pw)
             else:
                 self.cfg.clear_password()
             self.cfg.save()
-            self.lbl_login.configure(text=self._login_state_text(), text_color=SUCCESS)
             self._refresh_spaces(c)
+            self._show_settings()
             self.log("로그인 성공")
         except AuthError as e:
-            messagebox.showerror("로그인 실패", str(e))
+            self.lbl_login_error.configure(text=str(e))
         except (ApiError, OSError) as e:
-            messagebox.showerror("연결 오류", str(e))
+            self.lbl_login_error.configure(text=str(e))
+
+    def _logout(self):
+        """세션 토큰을 지우고 로그인 화면으로 돌아간다. (서버 주소/아이디는 재로그인용으로 유지)"""
+        self._collect()
+        self.cfg.token = ""
+        self._pw = ""
+        self.cfg.save()
+        # 로그인 필드 프리필 갱신
+        self.e_pw.delete(0, "end")
+        if self.cfg.get_password():
+            self.e_pw.insert(0, self.cfg.get_password())
+        self.lbl_login_error.configure(text="")
+        self._show_login()
 
     def _auto_sequence(self):
         """시작 시: 자동 로그인 → (설정 시) 드라이브 연결 → 동기화 트리거."""
@@ -302,7 +366,9 @@ class App:
             c = GenDiskClient(cfg.server_url)
             c.login(cfg.username, pw)
             cfg.token = c.token
+            self._pw = pw
             cfg.save()
+            self.root.after(0, self._show_settings)
             self.set_status("자동 로그인 성공", SUCCESS)
             self.log("자동 로그인 성공")
         except Exception as e:
@@ -320,7 +386,7 @@ class App:
 
     def try_relogin(self):
         """세션 만료 시 저장된 정보로 조용히 재로그인."""
-        pw = self.cfg.get_password()
+        pw = self.cfg.get_password() or self._pw
         if not (self.cfg.username and pw):
             return
         try:
@@ -353,7 +419,7 @@ class App:
             messagebox.showerror("자동 실행 등록 실패", str(e))
 
     def _collect(self):
-        self.cfg.server_url = self.e_url.get().strip()
+        """설정 화면의 값들을 cfg에 모은다. (서버/아이디/토큰은 로그인에서만 설정)"""
         self.cfg.space = self.cmb_space.get() or "home"
         self.cfg.local_folder = self.e_folder.get().strip()
         self.cfg.drive_letter = self.cmb_drive.get()
@@ -368,8 +434,8 @@ class App:
         self.cfg.auto_connect_drive = self.var_autodrive.get()
         if not self.cfg.save_credentials:
             self.cfg.clear_password()
-        elif self.e_pw.get():
-            self.cfg.set_password(self.e_pw.get())
+        elif self._pw:
+            self.cfg.set_password(self._pw)
 
     def _save(self):
         self._collect()
@@ -389,9 +455,9 @@ class App:
 
     def _connect_drive(self):
         self._collect()
-        pw = self.e_pw.get() or self.cfg.get_password()
+        pw = self._pw or self.cfg.get_password()
         if not self.cfg.server_url or not self.cfg.username or not pw:
-            messagebox.showwarning("정보 필요", "서버 주소·아이디·비밀번호가 필요합니다.")
+            messagebox.showwarning("정보 필요", "로그인 후 다시 시도하세요 (비밀번호가 필요합니다).")
             return
         # 먼저 서버의 /dav 를 직접 확인 → 서버 문제와 로컬(WebClient) 문제를 구분
         try:
