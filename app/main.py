@@ -1,4 +1,4 @@
-"""GenDisk — self-hosted personal cloud storage (gendisk.cloud)."""
+"""genDISK — self-hosted personal cloud storage (gendisk.cloud)."""
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -14,7 +14,7 @@ STATIC_DIR = BASE_DIR / "static"
 DOWNLOADS_DIR = BASE_DIR / "downloads"
 WIN_CLIENT = "gendisk-sync.exe"
 
-app = FastAPI(title="GenDisk", version="0.1.0")
+app = FastAPI(title="genDISK", version="0.1.0")
 init_db()
 
 app.include_router(auth.router)

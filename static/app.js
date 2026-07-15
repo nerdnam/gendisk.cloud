@@ -1,4 +1,4 @@
-/* GenDisk 프론트엔드 */
+/* genDISK 프론트엔드 */
 const $ = (id) => document.getElementById(id);
 
 let currentPath = "";
