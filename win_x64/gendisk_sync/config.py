@@ -37,6 +37,7 @@ class Config:
     auto_login: bool = False        # 프로그램 시작 시 자동 로그인
     auto_connect_drive: bool = False  # 자동 로그인 후 드라이브 자동 연결
     drive_letter: str = "N:"
+    appearance: str = "system"        # 화면 테마: light / dark / system(자동)
 
     @classmethod
     def load(cls) -> "Config":

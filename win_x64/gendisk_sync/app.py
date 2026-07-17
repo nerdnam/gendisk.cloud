@@ -26,7 +26,12 @@ SUCCESS = ("#1C8A3B", "#30D158")
 DANGER = ("#C7362F", "#FF453A")
 MUTED = ("gray45", "gray60")
 
-# 앱 시작 시 한 번만: 시스템 테마를 따라가고, macOS풍 파란 강조 테마 사용.
+# 화면 테마 선택(설정) ↔ customtkinter 모드 매핑
+_THEME_LABELS = {"light": "라이트", "dark": "다크", "system": "자동"}
+_THEME_MODES = {v: k for k, v in _THEME_LABELS.items()}
+
+# 앱 시작 시 한 번만: 기본은 시스템 테마, macOS풍 파란 강조 테마 사용.
+# (실제 적용 모드는 App.__init__ 에서 저장된 설정값으로 덮어쓴다.)
 ctk.set_appearance_mode("system")
 ctk.set_default_color_theme("blue")
 
@@ -71,6 +76,8 @@ class SyncWorker(threading.Thread):
 class App:
     def __init__(self, startup: bool = False):
         self.cfg = Config.load()
+        # 저장된 화면 테마(light/dark/system) 적용
+        ctk.set_appearance_mode(self.cfg.appearance if self.cfg.appearance in _THEME_MODES.values() else "system")
         # 이번 세션의 비밀번호(WebDAV 드라이브 연결용). 저장 여부와 무관하게 메모리에 보관.
         self._pw = self.cfg.get_password()
         self.root = ctk.CTk()
@@ -275,6 +282,13 @@ class App:
         ctk.CTkSwitch(c, text="자동 로그인 후 드라이브 자동 연결", variable=self.var_autodrive).pack(
             anchor="w", pady=6)
 
+        # ── 화면 테마 ──
+        c = self._card(body, "화면 테마")
+        self.seg_theme = ctk.CTkSegmentedButton(
+            c, values=list(_THEME_LABELS.values()), command=self._on_theme_change)
+        self.seg_theme.set(_THEME_LABELS.get(self.cfg.appearance, "자동"))
+        self.seg_theme.pack(fill="x")
+
         # ── 동기화 ──
         c = self._card(body, "동기화")
         self._field_label(c, "동기화할 저장소").pack(fill="x")
@@ -454,6 +468,13 @@ class App:
             autostart.sync(self.var_autostart.get())
         except OSError as e:
             messagebox.showerror("자동 실행 등록 실패", str(e))
+
+    def _on_theme_change(self, label):
+        """라이트/다크/자동 선택 → 즉시 적용 + 저장."""
+        mode = _THEME_MODES.get(label, "system")
+        self.cfg.appearance = mode
+        ctk.set_appearance_mode(mode)
+        self.cfg.save()
 
     def _collect(self):
         """설정 화면의 값들을 cfg에 모은다. (서버/아이디/토큰은 로그인에서만 설정)"""
