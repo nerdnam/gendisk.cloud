@@ -15,6 +15,7 @@ from . import autostart
 from .client import ApiError, AuthError, GenDiskClient, webdav_preflight
 from .config import Config
 from .engine import SyncEngine
+from .icon import icon_path, render_icon
 from .webdav_mount import (
     connect_drive, disconnect_drive, start_webclient_elevated, webclient_running)
 
@@ -76,6 +77,7 @@ class App:
         self.root.title("genDISK")
         self.root.geometry("560x820")
         self.root.minsize(520, 640)
+        self._apply_window_icon()
         self._build_ui()
         self.worker = SyncWorker(self)
         self.worker.start()
@@ -92,17 +94,25 @@ class App:
         if self.cfg.auto_login and self.cfg.username and self.cfg.get_password():
             threading.Thread(target=self._auto_sequence, daemon=True).start()
 
+    # ---------- 창/트레이 아이콘 ----------
+    def _apply_window_icon(self):
+        """창(제목줄·작업표시줄) 아이콘을 genDISK 마크로. customtkinter 가 200ms 뒤
+        기본 아이콘으로 덮으므로 그 이후에도 한 번 더 적용한다."""
+        def _set():
+            try:
+                self.root.iconbitmap(icon_path())
+            except Exception:
+                pass
+        _set()
+        self.root.after(300, _set)
+
     # ---------- 시스템 트레이 ----------
     def _build_tray(self):
         try:
             import pystray
-            from PIL import Image, ImageDraw
         except Exception:
             return  # pystray 없으면 트레이 비활성 (닫기 = 종료)
-        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-        d = ImageDraw.Draw(img)
-        d.ellipse([4, 4, 60, 60], fill=(0, 122, 255, 255))
-        d.ellipse([20, 22, 44, 46], fill=(255, 255, 255, 255))  # 간단한 디스크 모양
+        img = render_icon(64)   # 안드로이드 앱과 동일한 마크
         menu = pystray.Menu(
             pystray.MenuItem("열기", self._tray_show, default=True),
             pystray.MenuItem("지금 동기화", lambda i, it: self.root.after(0, self._sync_now)),

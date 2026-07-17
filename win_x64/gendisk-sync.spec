@@ -8,10 +8,13 @@ hiddenimports = [
     'gendisk_sync', 'gendisk_sync.app', 'gendisk_sync.client',
     'gendisk_sync.config', 'gendisk_sync.engine',
     'gendisk_sync.autostart', 'gendisk_sync.secret',
-    'gendisk_sync.webdav_mount',
+    'gendisk_sync.webdav_mount', 'gendisk_sync.icon',
     'pystray', 'pystray._win32',
     'PIL', 'PIL.Image', 'PIL.ImageDraw',
 ]
+
+# 앱 아이콘(.ico)을 번들 루트에 넣어 실행 중 창 아이콘으로도 쓴다.
+datas += [('gendisk.ico', '.')]
 
 # customtkinter 는 테마 JSON·폰트 등 데이터 파일을 함께 번들해야 실행된다.
 # darkdetect 는 시스템 다크/라이트 감지에 쓰인다.
@@ -49,6 +52,7 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,          # GUI 앱 — 콘솔 창 숨김
+    icon='gendisk.ico',     # 안드로이드 앱과 동일한 genDISK 마크
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
