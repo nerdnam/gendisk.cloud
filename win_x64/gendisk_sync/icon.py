@@ -25,7 +25,10 @@ def render_icon(size: int):
 
 
 def icon_path() -> str:
-    """번들된 gendisk.ico 경로 (창 제목줄·exe 아이콘). onefile 은 _MEIPASS."""
-    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(
-        os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, "gendisk.ico")
+    """번들된 로고 .ico 경로 (창 제목줄·exe 아이콘). onefile 은 _MEIPASS, 소스는 win_x64/logo/."""
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return os.path.join(base, "gendisk-icon.ico")
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "logo", "gendisk-icon.ico")

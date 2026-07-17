@@ -14,7 +14,7 @@ hiddenimports = [
 ]
 
 # 앱 아이콘(.ico, 창/exe)과 로고 PNG(트레이·헤더 로고)를 번들 루트에 넣는다.
-datas += [('gendisk.ico', '.'), ('logo/gendisk-icon.png', '.')]
+datas += [('logo/gendisk-icon.ico', '.'), ('logo/gendisk-icon.png', '.')]
 
 # customtkinter 는 테마 JSON·폰트 등 데이터 파일을 함께 번들해야 실행된다.
 # darkdetect 는 시스템 다크/라이트 감지에 쓰인다.
@@ -52,7 +52,7 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,          # GUI 앱 — 콘솔 창 숨김
-    icon='gendisk.ico',     # 안드로이드 앱과 동일한 genDISK 마크
+    icon='logo/gendisk-icon.ico',   # 사용자가 변환한 실제 로고 .ico
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
