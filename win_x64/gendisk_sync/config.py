@@ -38,6 +38,13 @@ class Config:
     auto_connect_drive: bool = False  # 자동 로그인 후 드라이브 자동 연결
     drive_letter: str = "N:"
     appearance: str = "system"        # 화면 테마: light / dark / system(자동)
+    # genDISK Drive (Windows Cloud Files 온디맨드 가상 드라이브)
+    vfs_enabled: bool = False         # 온디맨드 드라이브 사용
+    vfs_root: str = ""                # 싱크루트 경로 (빈 값이면 %USERPROFILE%\genDISK)
+
+    def vfs_root_path(self) -> str:
+        import os
+        return self.vfs_root or os.path.expandvars(r"%USERPROFILE%\genDISK")
 
     @classmethod
     def load(cls) -> "Config":

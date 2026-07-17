@@ -14,6 +14,7 @@ import customtkinter as ctk
 from . import autostart
 from .client import ApiError, AuthError, GenDiskClient, webdav_preflight
 from .config import Config
+from .drive import DriveController
 from .engine import SyncEngine
 from .icon import icon_path, render_icon
 from .webdav_mount import (
@@ -88,9 +89,13 @@ class App:
         self._build_ui()
         self.worker = SyncWorker(self)
         self.worker.start()
+        self.drive = DriveController(self.cfg, on_reauth=self._drive_reauth, log=self.log)
         self.tray = None
         self._tray_notified = False
         self._build_tray()
+        # genDISK Drive 가 켜져 있고 로그인돼 있으면 시작 시 연결
+        if self.cfg.vfs_enabled and self.cfg.token:
+            self._start_drive_async()
         # 닫기(X)는 트레이가 있으면 트레이로 숨기고, 없으면 그냥 종료
         self.root.protocol("WM_DELETE_WINDOW",
                            self._hide_to_tray if self.tray else self._real_quit)
@@ -150,6 +155,10 @@ class App:
 
     def _real_quit(self):
         self._collect(); self.cfg.save()
+        try:
+            self.drive.stop()   # provider 연결만 해제(노드/싱크루트는 유지 → 다음 실행 시 재연결)
+        except Exception:
+            pass
         self.worker.stop()
         if self.tray is not None:
             try:
@@ -335,6 +344,15 @@ class App:
                       fg_color="transparent", border_width=1,
                       text_color=ACCENT, hover_color=("gray90", "gray25")).pack(fill="x")
 
+        # ── genDISK Drive (온디맨드 클라우드) ──
+        c = self._card(body, "genDISK Drive (온디맨드)")
+        self._field_label(
+            c, "iCloud처럼 탐색기 사이드바에 genDISK 드라이브로 나타납니다.\n"
+               "파일은 목록만 먼저 보이고, 열 때 자동으로 내려받습니다(온디맨드).").pack(fill="x")
+        self.var_vfs = tk.BooleanVar(value=self.cfg.vfs_enabled)
+        ctk.CTkSwitch(c, text="genDISK Drive 연결", variable=self.var_vfs,
+                      command=self._toggle_vfs).pack(anchor="w", pady=(8, 0))
+
         # ── 상태 & 로그 ──
         c = self._card(body, "상태")
         self.lbl_status = ctk.CTkLabel(c, text="대기 중", font=self.font_s,
@@ -372,6 +390,8 @@ class App:
             self._refresh_spaces(c)
             self._show_settings()
             self.log("로그인 성공")
+            if self.cfg.vfs_enabled:
+                self._start_drive_async()
         except AuthError as e:
             self.lbl_login_error.configure(text=str(e))
         except (ApiError, OSError) as e:
@@ -416,6 +436,8 @@ class App:
                 self.log(f"{cfg.drive_letter} 드라이브 자동 연결")
             except Exception as e:
                 self.log(f"드라이브 자동 연결 실패: {e}")
+        if cfg.vfs_enabled:
+            self._start_drive_async()
         if cfg.enabled:
             self.worker.sync_now()
 
@@ -432,6 +454,55 @@ class App:
             self.log("세션 재로그인 성공")
         except Exception as e:
             self.log(f"재로그인 실패: {e}")
+
+    # ---------- genDISK Drive (온디맨드) ----------
+    def _drive_reauth(self) -> bool:
+        """드라이브 콜백에서 세션 만료 시 저장된 정보로 재로그인 (성공 시 cfg.token 갱신)."""
+        pw = self.cfg.get_password() or self._pw
+        if not (self.cfg.server_url and self.cfg.username and pw):
+            return False
+        try:
+            c = GenDiskClient(self.cfg.server_url)
+            c.login(self.cfg.username, pw)
+            self.cfg.token = c.token
+            self.cfg.save()
+            return True
+        except Exception:
+            return False
+
+    def _start_drive_async(self):
+        try:
+            space = self.cmb_space.get() or self.cfg.space   # 위젯 접근은 메인 스레드에서
+        except Exception:
+            space = self.cfg.space
+        def work():
+            try:
+                self.cfg.space = space
+                self.drive.start()
+                self.cfg.vfs_enabled = True
+                self.cfg.save()
+                self.set_status("genDISK Drive 연결됨", SUCCESS)
+                self.log("genDISK Drive 를 연결했습니다 (탐색기 사이드바 확인).")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"genDISK Drive 연결 실패: {e}")
+                self.set_status("genDISK Drive 연결 실패", DANGER)
+                self.root.after(0, lambda: self.var_vfs.set(False))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _toggle_vfs(self):
+        if self.var_vfs.get():
+            if not (self.cfg.server_url and self.cfg.token):
+                messagebox.showwarning("로그인 필요", "먼저 로그인하세요.")
+                self.var_vfs.set(False)
+                return
+            self._start_drive_async()
+        else:
+            def work():
+                self.drive.stop(remove_node=True)
+                self.cfg.vfs_enabled = False
+                self.cfg.save()
+                self.set_status("genDISK Drive 해제됨", MUTED)
+            threading.Thread(target=work, daemon=True).start()
 
     def _refresh_spaces(self, client):
         try:

@@ -82,13 +82,16 @@ class GenDiskClient:
 
     # ---------- 저수준 요청 ----------
     def _request(self, method: str, path: str, *, params=None, json_body=None,
-                 data: bytes | None = None, content_type: str | None = None):
+                 data: bytes | None = None, content_type: str | None = None,
+                 extra_headers: dict | None = None):
         url = self.base_url + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
         headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
         if self.token:
             headers["Authorization"] = "Bearer " + self.token
+        if extra_headers:
+            headers.update(extra_headers)
         body = data
         if json_body is not None:
             body = json.dumps(json_body).encode("utf-8")
@@ -174,10 +177,29 @@ class GenDiskClient:
                             params={"space": space, "path": path})
         return resp.read()
 
+    def download_range(self, space: str, path: str, offset: int, length: int) -> bytes:
+        """[offset, offset+length) 바이트만 받는다 (온디맨드 하이드레이션용).
+        서버는 Range 를 지원해 206 을 준다. 서버가 Range 를 무시하고 200 을 주면
+        받은 전체에서 필요한 구간을 잘라 반환한다(안전장치)."""
+        end = offset + length - 1
+        resp = self._request("GET", "/api/files/download",
+                            params={"space": space, "path": path},
+                            extra_headers={"Range": f"bytes={offset}-{end}"})
+        data = resp.read()
+        status = getattr(resp, "status", None) or resp.getcode()
+        if status == 200 and (offset or length < len(data)):
+            data = data[offset:offset + length]
+        return data
+
     def put(self, space: str, path: str, data: bytes) -> dict:
         return self._json("POST", "/api/sync/put",
                          params={"space": space, "path": path},
                          data=data, content_type="application/octet-stream")
+
+    def list_dir(self, space: str, path: str = "") -> list[dict]:
+        """폴더의 직속 항목 목록. [{name, path, is_dir, size, ...}] (온디맨드 채우기용)."""
+        return self._json("GET", "/api/files/list",
+                          params={"space": space, "path": path}).get("entries", [])
 
     def mkdir(self, space: str, path: str):
         try:
