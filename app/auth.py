@@ -60,17 +60,23 @@ def current_user(request: Request) -> dict:
     conn = get_db()
     try:
         row = conn.execute(
-            """SELECT u.id, u.username, u.is_admin, s.expires_at FROM sessions s
+            """SELECT u.id, u.username, u.is_admin, s.expires_at, s.last_seen FROM sessions s
                JOIN users u ON u.id = s.user_id WHERE s.token = ?""",
             (token,),
         ).fetchone()
         if row is None:
             raise HTTPException(401, "세션이 유효하지 않습니다")
+        now = _utcnow()
         expires = datetime.fromisoformat(row["expires_at"])
-        if expires < _utcnow():
+        if expires < now:
             conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
             conn.commit()
             raise HTTPException(401, "세션이 만료되었습니다")
+        # 마지막 활동 시각 갱신 (60초 스로틀 — serverinfo 활성 사용자 집계용, 쓰기 최소화)
+        last = row["last_seen"]
+        if last is None or datetime.fromisoformat(last) < now - timedelta(seconds=60):
+            conn.execute("UPDATE sessions SET last_seen = ? WHERE token = ?", (now.isoformat(), token))
+            conn.commit()
         return {
             "id": row["id"],
             "username": row["username"],

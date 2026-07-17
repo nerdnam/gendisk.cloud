@@ -19,6 +19,7 @@ ghcr.io/nerdnam/gendisk.cloud  (linux/amd64, linux/arm64)
 - [외부 저장소 (도커 볼륨 마운트)](#외부-저장소-도커-볼륨-마운트)
 - [계정 관리](#계정-관리)
 - [외부 공유 (링크로 공유)](#외부-공유-링크로-공유)
+- [Homepage 대시보드 위젯](#homepage-대시보드-위젯)
 - [업데이트 및 버전 관리](#업데이트-및-버전-관리)
 - [프로젝트 구조](#프로젝트-구조)
 - [API](#api)
@@ -267,6 +268,35 @@ Authorization: Bearer <session_token>
 
 ---
 
+## Homepage 대시보드 위젯
+
+[Homepage](https://gethomepage.dev)의 **Nextcloud 위젯**과 호환되는 `serverinfo` API를 제공하므로, Homepage 대시보드에 GenDisk를 그대로 띄울 수 있습니다 (CPU 부하·메모리·여유 공간·파일 수·공유 수·활성 사용자).
+
+**1. 토큰 설정** — compose.yaml 의 `environment` 에 임의의 토큰을 넣습니다:
+
+```yaml
+    environment:
+      - GENDISK_SERVERINFO_TOKEN=원하는_랜덤_문자열
+```
+
+**2. Homepage 위젯 등록** — `services.yaml` 에 `nextcloud` 위젯으로 추가:
+
+```yaml
+    - GenDisk:
+        href: https://gendisk.example.com
+        widget:
+          type: nextcloud
+          url: https://gendisk.example.com
+          key: 원하는_랜덤_문자열      # 위 토큰과 동일
+          # fields: ["cpuload", "memoryusage", "freespace", "numfiles", "numshares", "activeusers"]
+```
+
+- 토큰(`key`) 대신 **관리자 아이디/비밀번호**(`username`/`password`)를 써도 됩니다 (토큰 미설정 시).
+- 내부적으로 `GET /ocs/v2.php/apps/serverinfo/api/v1/info` 를 Nextcloud OCS 형식으로 응답합니다. 인증(토큰 또는 관리자)이 없으면 정보를 전혀 노출하지 않습니다(401).
+- CPU 부하·메모리는 Linux(도커) 기준으로 채워집니다.
+
+---
+
 ## 업데이트 및 버전 관리
 
 이미지는 GitHub Actions가 자동으로 빌드해 ghcr.io에 올리며, **버전은 main에 push할 때마다 자동으로 올라갑니다** (0.0.1 → 0.0.2 → 0.0.3 …):
@@ -387,6 +417,12 @@ data/
 | POST | `/users/quota` | 개인 저장소 용량 제한 설정 (bytes, 0=무제한) |
 | GET | `/mounts` | 외부 저장소 목록 + 저장소별 접근 사용자 |
 | POST | `/mounts/grant` | 한 저장소에 접근 가능한 사용자 목록 설정 |
+
+### 대시보드 위젯 (Nextcloud 호환)
+
+| 메서드 | 경로 | 설명 |
+|--------|------|------|
+| GET | `/ocs/v2.php/apps/serverinfo/api/v1/info` | Nextcloud `serverinfo` 호환 — Homepage 위젯용 시스템/저장소/활성 사용자 정보. 인증: `NC-Token` 헤더(`GENDISK_SERVERINFO_TOKEN`) 또는 관리자 Basic ([위 상세](#homepage-대시보드-위젯)) |
 
 전체 스키마는 서버 실행 후 `http://서버주소:8000/docs` (Swagger UI)에서 확인할 수 있습니다.
 

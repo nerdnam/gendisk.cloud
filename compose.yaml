@@ -17,6 +17,11 @@ services:
       # 예시 (원하는 대로 수정/추가):
       # - /mnt/Data0/Media:/app/mounts/media
       # - /mnt/Data0/Backup:/app/mounts/backup:ro
+    # environment:
+      # ── Homepage 대시보드 위젯 (Nextcloud 위젯 호환) ──────────────
+      # 아래 토큰을 설정하면 Homepage 의 nextcloud 위젯에서 이 서버를 띄울 수 있습니다.
+      # Homepage 위젯의 key 에 같은 값을 넣으세요. (미설정 시 관리자 아이디/비번으로도 가능)
+      # - GENDISK_SERVERINFO_TOKEN=원하는_랜덤_문자열
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/auth/status')"]

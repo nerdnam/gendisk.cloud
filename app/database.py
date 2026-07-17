@@ -54,7 +54,8 @@ def init_db() -> None:
                 token TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                expires_at TEXT NOT NULL
+                expires_at TEXT NOT NULL,
+                last_seen TEXT                    -- 마지막 활동 시각 (활성 사용자 집계용)
             );
             CREATE TABLE IF NOT EXISTS qr_tokens (
                 -- handle: 폴링/이미지 URL에 노출되는 비-교환용 식별자
@@ -110,6 +111,9 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE users ADD COLUMN quota_bytes INTEGER NOT NULL DEFAULT 0"
             )
+        scols = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+        if "last_seen" not in scols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN last_seen TEXT")
         no_admin = (
             conn.execute("SELECT COUNT(*) AS n FROM users WHERE is_admin = 1").fetchone()["n"] == 0
         )

@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import admin, auth, files, shares, sync
+from . import admin, auth, files, serverinfo, shares, sync
 from .database import init_db
 from .webdav import DAV_METHODS, webdav_endpoint
 
@@ -23,6 +23,7 @@ app.include_router(admin.router)
 app.include_router(sync.router)
 app.include_router(shares.router)
 app.include_router(shares.public_router)
+app.include_router(serverinfo.router)   # Nextcloud 호환 serverinfo (Homepage 위젯)
 
 # WebDAV: /dav 및 그 하위 경로를 모든 WebDAV 메서드로 처리
 app.add_route("/dav", webdav_endpoint, methods=DAV_METHODS)
