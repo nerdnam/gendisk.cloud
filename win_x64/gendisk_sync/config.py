@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from . import secret
 
@@ -41,6 +41,10 @@ class Config:
     # genDISK Drive (Windows Cloud Files 온디맨드 가상 드라이브)
     vfs_enabled: bool = False         # 온디맨드 드라이브 사용
     vfs_root: str = ""                # 싱크루트 경로 (빈 값이면 %USERPROFILE%\genDISK)
+    # 일반(범용) WebDAV 서버 연결 목록. 각 항목은 dict:
+    #   {name, url, username, password_enc(DPAPI), drive, auto(bool)}
+    # genDISK 서버 마운트와 별개로, 임의 WebDAV 서버(NAS/Nextcloud 등)를 드라이브로 연결.
+    webdav_mounts: list = field(default_factory=list)
 
     def vfs_root_path(self) -> str:
         import os

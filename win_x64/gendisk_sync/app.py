@@ -17,8 +17,9 @@ from .config import Config
 from .drive import DriveController
 from .engine import SyncEngine
 from .icon import icon_path, render_icon
+from .webdav_manager import WebDavManager
 from .webdav_mount import (
-    cleanup_stale_webdav, connect_drive, disconnect_drive,
+    cleanup_stale_webdav, connect_drive, connect_url, disconnect_drive,
     start_webclient_elevated, webclient_running)
 
 # macOS 시스템 강조색 (라이트/다크). accent 버튼에 사용.
@@ -109,6 +110,9 @@ class App:
         # genDISK Drive 가 켜져 있고 로그인돼 있으면 시작 시 연결
         if self.cfg.vfs_enabled and self.cfg.token:
             self._start_drive_async()
+        # 저장된 일반 WebDAV 연결 중 '자동 연결' 항목을 시작 시 마운트 (genDISK 로그인과 무관)
+        if any(m.get("auto") for m in self.cfg.webdav_mounts):
+            threading.Thread(target=self._auto_connect_webdav_mounts, daemon=True).start()
         # 닫기(X)는 트레이가 있으면 트레이로 숨기고, 없으면 그냥 종료
         self.root.protocol("WM_DELETE_WINDOW",
                            self._hide_to_tray if self.tray else self._real_quit)
@@ -365,6 +369,9 @@ class App:
         ctk.CTkButton(c, text="🧹 끊긴 WebDAV 연결 정리", command=self._cleanup_webdav,
                       fg_color="transparent", border_width=1,
                       text_color=MUTED, hover_color=("gray90", "gray25")).pack(fill="x", pady=(6, 0))
+        ctk.CTkButton(c, text="🌐 일반 WebDAV 서버 연결…", command=self._open_webdav_manager,
+                      fg_color="transparent", border_width=1,
+                      text_color=ACCENT, hover_color=("gray90", "gray25")).pack(fill="x", pady=(6, 0))
 
         # ══════ 오른쪽 열 ══════
         # ── 시작 옵션 ──
@@ -675,6 +682,35 @@ class App:
             self.log(f"{self.cmb_drive.get()} 연결을 해제했습니다.")
         except Exception as e:
             messagebox.showerror("연결 해제 실패", str(e))
+
+    def _open_webdav_manager(self):
+        """일반(범용) WebDAV 서버 연결 관리 창을 연다."""
+        self._collect()   # 현재 화면 값 반영 (그래야 관리자에서 cfg.save 시 유실 없음)
+        try:
+            win = getattr(self, "_webdav_win", None)
+            if win is not None and win.winfo_exists():
+                win.lift(); win.focus_force()
+                return
+            self._webdav_win = WebDavManager(self.root, self.cfg, self.log)
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("일반 WebDAV", f"창을 열 수 없습니다: {e}")
+
+    def _auto_connect_webdav_mounts(self):
+        """저장된 일반 WebDAV 연결 중 'auto' 항목을 시작 시 마운트한다 (백그라운드)."""
+        for m in list(self.cfg.webdav_mounts):
+            if not m.get("auto"):
+                continue
+            drive = m.get("drive", "")
+            url = m.get("url", "")
+            if not drive or not url:
+                continue
+            try:
+                from . import secret
+                pw = secret.decrypt(m.get("password_enc", "")) or ""
+                connect_url(drive, url, m.get("username", ""), pw)
+                self.log(f"[WebDAV] {drive} 자동 연결: {m.get('name') or url}")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"[WebDAV] 자동 연결 실패({m.get('name') or url}): {e}")
 
     def _cleanup_webdav(self):
         """끊긴 WebDAV 드라이브/네트워크 위치 잔여를 제거하고, 자동 연결을 끈다."""

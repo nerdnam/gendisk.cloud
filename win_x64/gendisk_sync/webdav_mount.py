@@ -39,9 +39,23 @@ def _mpr():
     return mpr
 
 
-def _unc(server_url: str) -> str:
-    u = urlsplit(server_url)
+def unc_from_url(webdav_url: str) -> str:
+    r"""임의의 WebDAV URL → Windows UNC 경로.
+
+    `https://nas.example.com:5006/remote.php/dav` →
+        `\\nas.example.com@SSL@5006\remote.php\dav`
+
+    - https 는 `@SSL`, 포트가 있으면 `@SSL@<port>` (표준 443 도 명시). http 는 포트만.
+    - URL 경로(`/a/b`)는 `\a\b` 로 옮긴다(임의 경로 지원 — genDISK `/dav` 외 NAS/Nextcloud 등).
+    """
+    u = urlsplit(webdav_url)
     host = u.hostname or ""
+    if not host:
+        raise ValueError("WebDAV 주소에서 호스트를 읽을 수 없습니다.")
+    if ":" in host:
+        # IPv6 리터럴은 UNC 서버 필드에 콜론을 쓸 수 없다 → Windows ipv6-literal.net 형식으로 변환.
+        #   2001:db8::1 → 2001-db8--1.ipv6-literal.net   (':'→'-', 존ID '%'→'s')
+        host = host.replace(":", "-").replace("%", "s") + ".ipv6-literal.net"
     port = u.port
     secure = u.scheme == "https"
     at = "@SSL" if secure else ""
@@ -49,7 +63,20 @@ def _unc(server_url: str) -> str:
         at = "@SSL@443"
     elif port and not (secure and port == 443) and not (not secure and port == 80):
         at += f"@{port}"
-    return rf"\\{host}{at}\dav"
+    unc = rf"\\{host}{at}"
+    path = (u.path or "").strip("/")
+    if path:
+        unc += "\\" + path.replace("/", "\\")
+    else:
+        # 경로가 없으면(서버 루트에서 WebDAV 제공, 예: Synology :5006) 리다이렉터의
+        # 사이트 루트 의사 공유(DavWWWRoot)를 붙인다 — 공유 없는 UNC 는 마운트가 거부된다.
+        unc += r"\DavWWWRoot"
+    return unc
+
+
+def _unc(server_url: str) -> str:
+    """genDISK 서버 전용: 서버 주소 뒤에 `/dav` 를 붙여 UNC 로."""
+    return unc_from_url(server_url.rstrip("/") + "/dav")
 
 
 _NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW
@@ -103,8 +130,7 @@ def _error_message(err: int, unc: str) -> str:
     return f"드라이브 연결 실패 (코드 {err}: {msg}){hint}\n대상: {unc}"
 
 
-def connect_drive(drive: str, server_url: str, username: str, password: str) -> str:
-    unc = _unc(server_url)
+def _connect_unc(drive: str, unc: str, username: str, password: str) -> str:
     drive = drive.rstrip("\\")
     _ensure_webclient()
     mpr = _mpr()
@@ -118,6 +144,16 @@ def connect_drive(drive: str, server_url: str, username: str, password: str) -> 
     if err != 0:
         raise RuntimeError(_error_message(err, unc))
     return unc
+
+
+def connect_drive(drive: str, server_url: str, username: str, password: str) -> str:
+    """genDISK 서버의 `/dav` 를 드라이브로 마운트."""
+    return _connect_unc(drive, _unc(server_url), username, password)
+
+
+def connect_url(drive: str, webdav_url: str, username: str, password: str) -> str:
+    """임의의 WebDAV URL(전체 경로 포함)을 드라이브로 마운트 — 범용 WebDAV용."""
+    return _connect_unc(drive, unc_from_url(webdav_url), username, password)
 
 
 def disconnect_drive(drive: str):

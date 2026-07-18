@@ -60,6 +60,47 @@ def webdav_preflight(server_url: str, username: str, password: str):
         raise RuntimeError(f"서버에 연결할 수 없습니다: {e.reason}")
 
 
+def webdav_preflight_url(webdav_url: str, username: str, password: str):
+    """임의의 WebDAV 주소로 PROPFIND(Depth 0)를 보내 연결 가능성을 확인한다.
+    genDISK 전용 `webdav_preflight` 와 달리 경로를 가정하지 않고 준 URL 그대로 검사한다.
+    실패 시 사람이 읽을 수 있는 RuntimeError, 성공(2xx/207)이면 조용히 통과."""
+    import base64
+
+    if urllib.parse.urlsplit(webdav_url).scheme != "https":
+        # http(비암호화)로는 Basic 자격증명이 평문(가역 base64)으로 새어나간다.
+        # 확인 요청 자체를 보내지 않고 즉시 안내한다. (Windows도 http Basic 인증을 기본 차단)
+        raise RuntimeError(
+            "보안상 http(암호화 안 됨) 주소로는 자격증명 확인을 보내지 않습니다.\n"
+            "https 주소를 사용하세요.")
+    url = webdav_url.rstrip("/") + "/"
+    cred = base64.b64encode(f"{username}:{password}".encode()).decode()
+    req = urllib.request.Request(url, method="PROPFIND", headers={
+        "Authorization": "Basic " + cred,
+        "Depth": "0",
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/xml",
+    })
+    try:
+        urllib.request.urlopen(req, timeout=15).read()
+        return
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        cf = _blocked_by_cloudflare(e.code, raw)
+        if cf:
+            raise RuntimeError("이 주소 접근이 차단됐습니다.\n" + cf)
+        if e.code in (404, 405, 501):
+            raise RuntimeError(
+                f"이 주소는 WebDAV를 제공하지 않는 것 같습니다 (HTTP {e.code}).\n"
+                "주소와 경로를 다시 확인하세요.")
+        if e.code == 401:
+            raise RuntimeError("인증 실패 — 아이디/비밀번호를 확인하세요.")
+        if e.code == 403:
+            raise RuntimeError("접근이 거부됐습니다 (HTTP 403) — 권한/경로를 확인하세요.")
+        raise RuntimeError(f"WebDAV 응답 오류 (HTTP {e.code}).")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"서버에 연결할 수 없습니다: {e.reason}")
+
+
 def _blocked_by_cloudflare(status: int, body: str) -> str | None:
     """Cloudflare/WAF 차단이면 사용자에게 도움이 되는 안내 메시지를 만든다."""
     low = body.lower()
