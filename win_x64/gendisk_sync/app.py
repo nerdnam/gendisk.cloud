@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 import customtkinter as ctk
 
-from . import autostart, single_instance
+from . import autostart, secret, single_instance
 from .client import (
     ApiError, AuthError, GenDiskClient, webdav_preflight, webdav_preflight_url)
 from .config import Config
@@ -251,6 +251,8 @@ class App:
     def _show_login(self):
         self.settings_frame.pack_forget()
         self.webdav_frame.pack_forget()
+        if getattr(self, "_login_mode", "genDISK") == "WebDAV":
+            self._refresh_login_profiles()   # 다시 돌아왔을 때 최신 프로파일 반영
         self.login_frame.pack(fill="both", expand=True)
 
     def _show_settings(self):
@@ -277,8 +279,11 @@ class App:
     # ---------- 로그인 화면 ----------
     def _build_login(self, parent):
         frame = ctk.CTkFrame(parent, fg_color="transparent")
-        card = ctk.CTkFrame(frame, corner_radius=16)
-        card.place(relx=0.5, rely=0.5, anchor="center")
+        # 가운데 정렬 행: [로그인 카드] + (WebDAV 모드에서만) [프로파일 선택 패널]
+        row = ctk.CTkFrame(frame, fg_color="transparent")
+        row.place(relx=0.5, rely=0.5, anchor="center")
+        card = ctk.CTkFrame(row, corner_radius=16)
+        card.pack(side="left")
         pad = ctk.CTkFrame(card, fg_color="transparent")
         pad.pack(padx=32, pady=28)
 
@@ -332,6 +337,9 @@ class App:
                                        command=self._login_submit,
                                        fg_color=ACCENT, hover_color=ACCENT_HOVER)
         self.btn_login.pack(pady=(8, 0))
+
+        # 오른쪽 프로파일 선택 패널 (WebDAV 모드에서만 표시 — _on_login_mode 에서 pack).
+        self.frm_login_profiles = ctk.CTkFrame(row, corner_radius=16)
         return frame
 
     def _on_login_mode(self, mode):
@@ -347,6 +355,8 @@ class App:
             self.e_url.configure(placeholder_text="WebDAV 주소 (예: https://호스트:포트/dav)")
             self.frm_login_drive.pack(fill="x", pady=(8, 0), before=self.sw_savecred)
             self.btn_login.configure(text="연결")
+            self._refresh_login_profiles()
+            self.frm_login_profiles.pack(side="left", padx=(16, 0), fill="y")
         else:
             # WebDAV 로 비웠던 경우 genDISK 주소를 되살린다.
             if not cur and self.cfg.server_url:
@@ -354,7 +364,49 @@ class App:
             self.lbl_login_subtitle.configure(text="로그인하고 파일을 동기화·연결하세요")
             self.e_url.configure(placeholder_text="서버 주소 (예: https://gendisk.cloud)")
             self.frm_login_drive.pack_forget()
+            self.frm_login_profiles.pack_forget()
             self.btn_login.configure(text="로그인")
+
+    def _refresh_login_profiles(self):
+        """오른쪽 패널: 저장된 WebDAV 프로파일 목록 + 관리(추가·편집) 진입. 로그인 불필요."""
+        for w in self.frm_login_profiles.winfo_children():
+            w.destroy()
+        pad = ctk.CTkFrame(self.frm_login_profiles, fg_color="transparent")
+        pad.pack(fill="both", expand=True, padx=18, pady=22)
+        ctk.CTkLabel(pad, text="저장된 프로파일", font=self.font_h).pack(anchor="w")
+        ctk.CTkLabel(pad, text="클릭하면 왼쪽 폼에 채워집니다.", font=self.font_s,
+                     text_color=MUTED).pack(anchor="w", pady=(0, 8))
+        # 로그인하지 않아도 프로파일 추가·편집·삭제 화면으로 바로 진입한다.
+        ctk.CTkButton(pad, text="＋ 프로파일 추가·편집", command=self._show_webdav,
+                      fg_color=ACCENT, hover_color=ACCENT_HOVER).pack(fill="x", pady=(0, 10))
+        mounts = self.cfg.webdav_mounts
+        if not mounts:
+            ctk.CTkLabel(pad, text="저장된 프로파일이 없습니다.\n위 '추가·편집'에서 만들 수 있어요.",
+                         font=self.font_s, text_color=MUTED, justify="left").pack(anchor="w")
+            return
+        lst = ctk.CTkScrollableFrame(pad, fg_color="transparent", width=260, height=340)
+        lst.pack(fill="both", expand=True)
+        for m in mounts:
+            name = m.get("name") or m.get("url") or "(이름 없음)"
+            sub = f"{m.get('drive', '')}   {m.get('url', '')}"
+            ctk.CTkButton(
+                lst, text=f"{name}\n{sub}", anchor="w", height=50, font=self.font_s,
+                fg_color=("gray92", "gray20"), text_color=("gray10", "gray90"),
+                hover_color=("gray85", "gray28"),
+                command=lambda mm=m: self._fill_login_from_profile(mm)).pack(fill="x", pady=4)
+
+    def _fill_login_from_profile(self, m):
+        """선택한 프로파일 값으로 로그인 폼을 채운다 (검토 후 '연결')."""
+        self.e_url.delete(0, "end"); self.e_url.insert(0, m.get("url", ""))
+        self.e_user.delete(0, "end"); self.e_user.insert(0, m.get("username", ""))
+        pw = secret.decrypt(m.get("password_enc", "")) or ""
+        self.e_pw.delete(0, "end")
+        if pw:
+            self.e_pw.insert(0, pw)
+        drive = m.get("drive", "")
+        if drive:
+            self.cmb_login_drive.set(drive)
+        self.lbl_login_error.configure(text="")
 
     def _login_submit(self):
         """기본 버튼/Enter 처리 — 로그인 화면 모드에 따라 분기."""
