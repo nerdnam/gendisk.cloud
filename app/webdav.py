@@ -6,9 +6,11 @@ mount the user may access); the rest is the path within it. Honors the same
 access, read-only, and quota rules as the rest of the app.
 """
 import contextlib
+import mimetypes
 import os
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from email.utils import formatdate
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
@@ -98,23 +100,52 @@ def _stat_etag(st: os.stat_result) -> str:
     return f"{st.st_mtime_ns:x}-{st.st_size:x}"
 
 
-def _prop_xml(href: str, name: str, is_dir: bool, size: int, mtime: float, etag: str) -> str:
+# DAV Class 2(잠금)를 광고하므로 supportedlock 을 제공한다 — Windows 탐색기 등은
+# 이 prop 이 있어야 읽기/쓰기(잠금 기반 저장)로 마운트한다.
+_SUPPORTEDLOCK = (
+    "<D:supportedlock>"
+    "<D:lockentry><D:lockscope><D:exclusive/></D:lockscope>"
+    "<D:locktype><D:write/></D:locktype></D:lockentry>"
+    "<D:lockentry><D:lockscope><D:shared/></D:lockscope>"
+    "<D:locktype><D:write/></D:locktype></D:lockentry>"
+    "</D:supportedlock>"
+)
+
+
+def _iso8601(mtime: float) -> str:
+    # DAV:creationdate 는 RFC 3339(ISO 8601) 형식이어야 한다 (getlastmodified 의 HTTP-date 와 다름).
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _prop_xml(href: str, name: str, is_dir: bool, size: int, mtime: float, etag: str,
+              *, ctype: str | None = None, quota: "tuple[int, int] | None" = None) -> str:
     lastmod = formatdate(mtime, usegmt=True)
+    created = _iso8601(mtime)
     if is_dir:
         typ = "<D:resourcetype><D:collection/></D:resourcetype>"
         length = ""
+        content_type = ""
     else:
         typ = "<D:resourcetype/>"
         length = f"<D:getcontentlength>{size}</D:getcontentlength>"
+        mime = ctype or mimetypes.guess_type(name)[0] or "application/octet-stream"
+        content_type = f"<D:getcontenttype>{_xml_escape(mime)}</D:getcontenttype>"
+    quota_xml = ""
+    if quota is not None:
+        used, avail = quota
+        quota_xml = (f"<D:quota-used-bytes>{used}</D:quota-used-bytes>"
+                     f"<D:quota-available-bytes>{avail}</D:quota-available-bytes>")
     return (
         "<D:response>"
         f"<D:href>{_xml_escape(href)}</D:href>"
         "<D:propstat><D:prop>"
         f"<D:displayname>{_xml_escape(name)}</D:displayname>"
-        f"{typ}{length}"
+        f"{typ}{length}{content_type}"
         f"<D:getlastmodified>{lastmod}</D:getlastmodified>"
-        f"<D:creationdate>{lastmod}</D:creationdate>"
+        f"<D:creationdate>{created}</D:creationdate>"
         f'<D:getetag>"{_xml_escape(etag)}"</D:getetag>'
+        f"{_SUPPORTEDLOCK}<D:lockdiscovery/>"
+        f"{quota_xml}"
         "</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>"
         "</D:response>"
     )
@@ -123,7 +154,14 @@ def _prop_xml(href: str, name: str, is_dir: bool, size: int, mtime: float, etag:
 def _multistatus(body: str) -> Response:
     xml = ('<?xml version="1.0" encoding="utf-8"?>'
            '<D:multistatus xmlns:D="DAV:">' + body + "</D:multistatus>")
-    return Response(xml, status_code=207, media_type='application/xml; charset="utf-8"')
+    return Response(xml, status_code=207, media_type="application/xml; charset=utf-8")
+
+
+def _finite_depth_error() -> Response:
+    # RFC 4918 §9.1: 서버는 Depth: infinity PROPFIND 를 거부할 수 있다.
+    xml = ('<?xml version="1.0" encoding="utf-8"?>'
+           '<D:error xmlns:D="DAV:"><D:propfind-finite-depth/></D:error>')
+    return Response(xml, status_code=403, media_type="application/xml; charset=utf-8")
 
 
 # ---------- 메서드 핸들러 ----------
@@ -138,6 +176,8 @@ def _handle_options() -> Response:
 
 
 def _propfind(user: dict, space: str | None, rel: str, depth: str) -> Response:
+    if depth.lower() == "infinity":
+        return _finite_depth_error()   # 무한 깊이 순회 거부 (RFC 준수, 클라이언트는 Depth:1 로 폴백)
     if space is None:  # 가상 루트: 접근 가능한 저장소 목록
         responses = [_prop_xml("/dav/", "genDISK", True, 0, 0, "root")]
         if depth != "0":
@@ -157,8 +197,17 @@ def _propfind(user: dict, space: str | None, rel: str, depth: str) -> Response:
         raise _fs_error(exc)
     is_dir = target.is_dir()
     name = target.name if rel else space
+    # 저장소(홈) 루트에는 RFC 4331 용량 prop 을 붙인다 — Finder/탐색기가 남은 공간을 표시하고
+    # 업로드를 허용하도록. 비용(dir_size) 때문에 루트에서만, 용량 제한이 있을 때만 계산한다.
+    target_quota = None
+    if is_dir and rel == "" and _is_home(space):
+        q = user_quota(user["id"])
+        if q > 0:
+            used = dir_size(user_root(user))
+            target_quota = (used, max(0, q - used))
     responses = [_prop_xml(_href(space, rel, is_dir), name, is_dir,
-                           0 if is_dir else st.st_size, st.st_mtime, _stat_etag(st))]
+                           0 if is_dir else st.st_size, st.st_mtime, _stat_etag(st),
+                           quota=target_quota)]
     if is_dir and depth != "0":
         try:
             children = sorted(target.iterdir(), key=lambda p: p.name.lower())
@@ -223,6 +272,8 @@ def _get(user: dict, space: str, rel: str, head: bool) -> Response:
         raise HTTPException(403)
     space_root(user, space)
     target = _safe(user, space, rel)
+    if target.is_dir():
+        raise HTTPException(405)   # 컬렉션에 대한 GET 은 정의되지 않음 → 405 (Allow 헤더 포함)
     if not target.is_file():
         raise HTTPException(404)
     if head:
@@ -349,7 +400,7 @@ def _lock(request, space: str, rel: str) -> Response:
         f"<D:lockroot><D:href>{_xml_escape(href)}</D:href></D:lockroot>"
         "</D:activelock></D:lockdiscovery></D:prop>"
     )
-    return Response(body, status_code=200, media_type='application/xml; charset="utf-8"',
+    return Response(body, status_code=200, media_type="application/xml; charset=utf-8",
                     headers={"Lock-Token": f"<{token}>"})
 
 
@@ -398,6 +449,8 @@ async def webdav_endpoint(request):
             return _proppatch(space, rel)
         raise HTTPException(405)
     except HTTPException as e:
-        return Response(status_code=e.status_code)
+        # 405 응답에는 RFC 상 Allow 헤더가 있어야 한다.
+        headers = {"Allow": ", ".join(DAV_METHODS)} if e.status_code == 405 else None
+        return Response(status_code=e.status_code, headers=headers)
     except ClientDisconnect:
         return Response(status_code=499)  # 클라이언트가 연결을 끊음
