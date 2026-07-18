@@ -1,11 +1,9 @@
-"""일반(범용) WebDAV 서버를 Windows 드라이브로 연결·관리하는 대화상자.
+"""메인 창 안에서 WebDAV 접속 프로파일을 만들고 관리하는 화면(패널).
 
-genDISK 서버 전용 마운트와 별개로, 임의의 WebDAV 서버(NAS/Nextcloud/기타)를
-전체 URL·자격증명·드라이브 문자로 저장해 탐색기 드라이브로 마운트한다.
-Windows는 네이티브 WebDAV 리다이렉터가 있으므로, 드라이브로 연결하면 탐색기가
-그대로 완전한 WebDAV 탐색기가 된다(복사·붙여넣기·열기·삭제·이름변경 모두 지원).
-
-자격증명은 DPAPI(현재 Windows 사용자에 묶임)로 암호화해 config.json 에 저장한다.
+팝업 창(Toplevel)이 아니라 App 메인 창에 끼워 넣는 CTkFrame 이다. 여러 개의
+WebDAV 서버 프로파일(이름·URL·자격증명·드라이브)을 생성/편집/삭제하고, 각각을
+Windows 드라이브로 연결/해제한다. 목록↔편집 폼도 이 패널 안에서 전환되어, 로그인처럼
+별도 창이 뜨지 않는다. 자격증명은 DPAPI 로 암호화해 config.json 에 저장한다.
 """
 import threading
 import tkinter as tk
@@ -15,7 +13,6 @@ import customtkinter as ctk
 
 from . import secret
 from .client import webdav_preflight_url
-from .icon import icon_path
 from .webdav_mount import connect_url, disconnect_drive, webclient_running
 
 ACCENT = ("#007AFF", "#0A84FF")
@@ -31,154 +28,182 @@ def _label(m: dict) -> str:
     return m.get("name") or m.get("url") or "(이름 없음)"
 
 
-class WebDavManager(ctk.CTkToplevel):
-    """저장된 일반 WebDAV 연결 목록 + 추가/편집/삭제/연결/해제."""
+class WebDavPanel(ctk.CTkFrame):
+    """메인 창에 표시되는 WebDAV 프로파일 관리 화면 (목록/편집을 안에서 전환)."""
 
-    def __init__(self, master, cfg, log):
-        super().__init__(master)
-        self._owner = master          # 항상 살아있는 상위 창(App.root) — 결과 콜백 마셜링용
+    def __init__(self, master, cfg, log, on_close):
+        super().__init__(master, fg_color="transparent")
         self.cfg = cfg
         self.log = log
-        self.title("일반 WebDAV 서버")
-        self.geometry("580x540")
-        self.minsize(520, 440)
-        self.transient(master)
-        self._apply_icon()
-        self._build()
-        self._reload()
-        # customtkinter Toplevel 이 부모 뒤로 가는 경우가 있어 전면화.
-        self.after(120, self._raise)
+        self.on_close = on_close
+        self.font_title = ctk.CTkFont(family="Segoe UI", size=20, weight="bold")
+        self.font_h = ctk.CTkFont(family="Segoe UI", size=13, weight="bold")
+        self.font_s = ctk.CTkFont(family="Segoe UI", size=12)
+        self._build_shell()
+        self.show_list()
 
-    def _apply_icon(self):
-        def _set():
-            try:
-                self.iconbitmap(icon_path())
-            except Exception:
-                pass
-        self.after(250, _set)
+    def _build_shell(self):
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=22, pady=(18, 4))
+        ctk.CTkLabel(header, text="WebDAV 서버", font=self.font_title).pack(side="left")
+        ctk.CTkButton(header, text="← 뒤로", width=88, command=self.on_close,
+                      fg_color="transparent", border_width=1, text_color=MUTED,
+                      hover_color=("gray90", "gray25")).pack(side="right")
+        self.body = ctk.CTkFrame(self, fg_color="transparent")
+        self.body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
-    def _raise(self):
-        try:
-            self.lift(); self.focus_force()
-        except Exception:
-            pass
-
-    def _post(self, fn):
-        """워커 스레드의 결과 콜백을 항상 살아있는 루트 이벤트루프로 넘긴다.
-        (관리자 창이 그 사이 닫혀도 destroy 된 Toplevel 에 after 를 걸어 TclError 나지 않도록)"""
-        try:
-            self._owner.after(0, fn)
-        except Exception:
-            pass
-
-    def _parent(self):
-        """messagebox 부모: 관리자 창이 아직 살아있으면 그 위, 닫혔으면 루트."""
-        try:
-            return self if self.winfo_exists() else self._owner
-        except Exception:
-            return self._owner
-
-    def _build(self):
-        head = ctk.CTkFrame(self, fg_color="transparent")
-        head.pack(fill="x", padx=16, pady=(16, 2))
-        ctk.CTkLabel(head, text="일반 WebDAV 서버",
-                     font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
-        ctk.CTkButton(head, text="+ 새 연결", width=92, command=self._add,
-                      fg_color=ACCENT, hover_color=ACCENT_HOVER).pack(side="right")
-        ctk.CTkLabel(
-            self,
-            text="NAS·Nextcloud 등 임의의 WebDAV 서버를 탐색기 드라이브로 연결합니다.\n"
-                 "연결하면 탐색기에서 일반 폴더처럼 파일을 복사·열기·삭제할 수 있어요.",
-            font=ctk.CTkFont(size=12), text_color=MUTED, justify="left").pack(
-            fill="x", padx=16, pady=(4, 0))
-        self.listbox = ctk.CTkScrollableFrame(self, fg_color=("gray92", "gray14"))
-        self.listbox.pack(fill="both", expand=True, padx=16, pady=(10, 16))
-
-    def _reload(self):
-        for w in self.listbox.winfo_children():
+    def _clear_body(self):
+        for w in self.body.winfo_children():
             w.destroy()
+
+    # ---------- 목록 화면 ----------
+    def show_list(self):
+        self._clear_body()
+        bar = ctk.CTkFrame(self.body, fg_color="transparent")
+        bar.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(
+            bar,
+            text="여러 WebDAV 서버(NAS·Nextcloud 등) 프로파일을 만들고 관리합니다.\n"
+                 "연결하면 탐색기에서 일반 폴더처럼 파일을 다룰 수 있어요.",
+            font=self.font_s, text_color=MUTED, justify="left").pack(side="left")
+        ctk.CTkButton(bar, text="+ 새 프로파일", width=124,
+                      command=lambda: self.show_form(None),
+                      fg_color=ACCENT, hover_color=ACCENT_HOVER).pack(side="right")
+        lst = ctk.CTkScrollableFrame(self.body, fg_color=("gray92", "gray14"))
+        lst.pack(fill="both", expand=True)
         mounts = self.cfg.webdav_mounts
         if not mounts:
-            ctk.CTkLabel(self.listbox,
-                         text="저장된 연결이 없습니다.\n오른쪽 위 '+ 새 연결'로 추가하세요.",
-                         text_color=MUTED, justify="left").pack(anchor="w", padx=8, pady=14)
+            ctk.CTkLabel(lst, text="저장된 프로파일이 없습니다.\n오른쪽 위 '+ 새 프로파일'로 추가하세요.",
+                         text_color=MUTED, justify="left").pack(anchor="w", padx=10, pady=16)
             return
         for i, m in enumerate(mounts):
-            self._row(i, m)
+            self._card(lst, i, m)
 
-    def _row(self, idx: int, m: dict):
-        card = ctk.CTkFrame(self.listbox, corner_radius=10)
-        card.pack(fill="x", pady=6, padx=4)
+    def _card(self, parent, idx: int, m: dict):
+        card = ctk.CTkFrame(parent, corner_radius=10)
+        card.pack(fill="x", pady=6, padx=6)
         top = ctk.CTkFrame(card, fg_color="transparent")
         top.pack(fill="x", padx=12, pady=(10, 0))
-        ctk.CTkLabel(top, text=_label(m),
-                     font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+        ctk.CTkLabel(top, text=_label(m), font=self.font_h).pack(side="left")
         tag = m.get("drive", "")
         if m.get("auto"):
             tag += "  · 자동"
-        ctk.CTkLabel(top, text=tag, text_color=MUTED).pack(side="right")
-        ctk.CTkLabel(card, text=m.get("url", ""), text_color=MUTED, anchor="w",
-                     font=ctk.CTkFont(size=11)).pack(fill="x", padx=12)
+        ctk.CTkLabel(top, text=tag, text_color=MUTED, font=self.font_s).pack(side="right")
+        ctk.CTkLabel(card, text=m.get("url", ""), text_color=MUTED, font=self.font_s,
+                     anchor="w").pack(fill="x", padx=12)
         btns = ctk.CTkFrame(card, fg_color="transparent")
         btns.pack(fill="x", padx=12, pady=(6, 10))
-        ctk.CTkButton(btns, text="연결", width=64, fg_color=ACCENT,
-                      hover_color=ACCENT_HOVER,
+        ctk.CTkButton(btns, text="연결", width=60, fg_color=ACCENT, hover_color=ACCENT_HOVER,
                       command=lambda mm=m: self._connect(mm)).pack(side="left")
-        ctk.CTkButton(btns, text="해제", width=64,
+        ctk.CTkButton(btns, text="해제", width=60,
                       command=lambda mm=m: self._disconnect(mm)).pack(side="left", padx=(6, 0))
         ctk.CTkButton(btns, text="편집", width=56, fg_color="transparent", border_width=1,
                       text_color=ACCENT, hover_color=("gray90", "gray25"),
-                      command=lambda i=idx, mm=m: self._edit(i, mm)).pack(side="left", padx=(6, 0))
+                      command=lambda i=idx, mm=m: self.show_form((i, mm))).pack(side="left", padx=(6, 0))
         ctk.CTkButton(btns, text="삭제", width=56, fg_color="transparent", border_width=1,
                       text_color=DANGER, hover_color=("gray90", "gray25"),
                       command=lambda i=idx: self._delete(i)).pack(side="left", padx=(6, 0))
 
-    # ---------- 추가/편집/삭제 ----------
-    def _add(self):
-        _WebDavEditDialog(self, None, self._on_saved)
+    # ---------- 편집/추가 폼 화면 (같은 패널 안에서 전환) ----------
+    def show_form(self, existing):
+        self._clear_body()
+        idx = existing[0] if existing else None
+        m = existing[1] if existing else {}
+        ctk.CTkLabel(self.body, text=("프로파일 편집" if existing else "새 프로파일"),
+                     font=self.font_h, anchor="w").pack(fill="x", pady=(0, 6))
+        form = ctk.CTkFrame(self.body, corner_radius=12)
+        form.pack(fill="x")
+        pad = ctk.CTkFrame(form, fg_color="transparent")
+        pad.pack(fill="x", padx=16, pady=14)
 
-    def _edit(self, idx: int, m: dict):
-        _WebDavEditDialog(self, (idx, m), self._on_saved)
+        def field(label, init="", show=None):
+            ctk.CTkLabel(pad, text=label, font=self.font_s, text_color=MUTED,
+                         anchor="w").pack(fill="x", pady=(6, 0))
+            e = ctk.CTkEntry(pad, show=show)
+            e.pack(fill="x")
+            if init:
+                e.insert(0, init)
+            return e
 
-    def _on_saved(self, idx, entry: dict):
+        e_name = field("이름 (예: 회사 NAS)", m.get("name", ""))
+        e_url = field("WebDAV 주소 (예: https://nas.example.com:5006/dav)", m.get("url", ""))
+        e_user = field("아이디", m.get("username", ""))
+        e_pw = field("비밀번호", secret.decrypt(m.get("password_enc", "")) or "", show="•")
+        ctk.CTkLabel(pad, text="드라이브 문자", font=self.font_s, text_color=MUTED,
+                     anchor="w").pack(fill="x", pady=(6, 0))
+        cmb = ctk.CTkOptionMenu(pad, values=_DRIVE_LETTERS, width=100)
+        cmb.set(m.get("drive", "W:") if m.get("drive", "W:") in _DRIVE_LETTERS else "W:")
+        cmb.pack(anchor="w")
+        var_auto = tk.BooleanVar(value=bool(m.get("auto")))
+        ctk.CTkSwitch(pad, text="프로그램 시작 시 자동 연결", variable=var_auto).pack(
+            anchor="w", pady=(12, 0))
+
+        row = ctk.CTkFrame(self.body, fg_color="transparent")
+        row.pack(fill="x", pady=(14, 0))
+        ctk.CTkButton(row, text="취소", width=90, command=self.show_list,
+                      fg_color="transparent", border_width=1, text_color=MUTED,
+                      hover_color=("gray90", "gray25")).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(row, text="저장", width=100, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                      command=lambda: self._save_form(
+                          idx, e_name, e_url, e_user, e_pw, cmb, var_auto)).pack(side="right")
+
+    def _save_form(self, idx, e_name, e_url, e_user, e_pw, cmb, var_auto):
+        url = e_url.get().strip()
+        if not url:
+            messagebox.showwarning("입력 필요", "WebDAV 주소를 입력하세요.", parent=self.winfo_toplevel())
+            return
+        if "://" not in url:
+            url = "https://" + url            # 스킴 없으면 https (포트는 보존)
+        if url.lower().startswith("http://") and not messagebox.askyesno(
+                "보안 경고",
+                "http(암호화 안 됨) 주소입니다. 비밀번호가 평문으로 전송될 수 있고\n"
+                "Windows도 기본적으로 http WebDAV의 Basic 인증을 막습니다.\n\n계속 저장할까요?",
+                parent=self.winfo_toplevel()):
+            return
+        entry = {
+            "name": e_name.get().strip(),
+            "url": url.rstrip("/"),
+            "username": e_user.get().strip(),
+            "password_enc": secret.encrypt(e_pw.get()) or "",
+            "drive": cmb.get(),
+            "auto": bool(var_auto.get()),
+        }
         if idx is None:
             self.cfg.webdav_mounts.append(entry)
         else:
             self.cfg.webdav_mounts[idx] = entry
         self.cfg.save()
-        self._reload()
+        self.show_list()
 
     def _delete(self, idx: int):
         m = self.cfg.webdav_mounts[idx]
         if not messagebox.askyesno(
-                "삭제", f"'{_label(m)}' 연결을 목록에서 삭제할까요?\n"
-                        "(이미 연결된 드라이브는 자동 해제되지 않습니다 — 필요하면 먼저 '해제')",
-                parent=self):
+                "삭제", f"'{_label(m)}' 프로파일을 삭제할까요?\n"
+                        "(이미 연결된 드라이브는 자동 해제되지 않습니다)",
+                parent=self.winfo_toplevel()):
             return
         del self.cfg.webdav_mounts[idx]
         self.cfg.save()
-        self._reload()
+        self.show_list()
 
-    # ---------- 연결/해제 ----------
+    # ---------- 연결/해제 (블로킹 호출은 워커 스레드에서) ----------
     def _connect(self, m: dict):
         url = m.get("url", "")
         user = m.get("username", "")
         drive = m.get("drive", "")
         pw = secret.decrypt(m.get("password_enc", "")) or ""
         if not url or not drive:
-            messagebox.showwarning("정보 필요", "주소와 드라이브 문자가 필요합니다.", parent=self)
+            messagebox.showwarning("정보 필요", "주소와 드라이브 문자가 필요합니다.",
+                                   parent=self.winfo_toplevel())
             return
 
         def work():
             try:
                 connect_url(drive, url, user, pw)
                 self.log(f"[WebDAV] {drive} 에 '{_label(m)}' 연결")
-                self._post(lambda: messagebox.showinfo(
-                    "연결됨", f"{drive} 드라이브로 연결했습니다.\n탐색기에서 확인하세요.",
-                    parent=self._parent()))
+                self._info("연결됨", f"{drive} 드라이브로 연결했습니다.\n탐색기에서 확인하세요.")
             except Exception as e:  # noqa: BLE001
                 err = str(e)
-                # 실패 진단: 서버 측(주소/인증/차단) 문제인지 로컬(WebClient) 문제인지 구분
                 diag = ""
                 try:
                     webdav_preflight_url(url, user, pw)
@@ -188,117 +213,33 @@ class WebDavManager(ctk.CTkToplevel):
                     pass
                 if not diag and not webclient_running():
                     diag = ("\n\n▶ Windows 'WebClient' 서비스가 꺼져 있을 수 있습니다.\n"
-                            "   메인 창의 'Windows WebClient 서비스 켜기'로 켠 뒤 다시 시도하세요.")
-                self._post(lambda: messagebox.showerror(
-                    "연결 실패", err + diag, parent=self._parent()))
+                            "   메인 화면의 'Windows WebClient 서비스 켜기'로 켠 뒤 다시 시도하세요.")
+                self._error("연결 실패", err + diag)
 
         threading.Thread(target=work, daemon=True).start()
 
     def _disconnect(self, m: dict):
-        # WNetCancelConnection2W 는 죽은/응답없는 서버에서 오래 블록될 수 있으므로
-        # 메인 스레드(UI)를 얼리지 않도록 워커에서 실행하고 결과만 마셜링한다.
         drive = m.get("drive", "")
 
         def work():
             try:
                 disconnect_drive(drive)
                 self.log(f"[WebDAV] {drive} 연결 해제")
-                self._post(lambda: messagebox.showinfo(
-                    "해제", f"{drive} 연결을 해제했습니다.", parent=self._parent()))
+                self._info("해제", f"{drive} 연결을 해제했습니다.")
             except Exception as e:  # noqa: BLE001
-                err = str(e)
-                self._post(lambda: messagebox.showerror(
-                    "해제 실패", err, parent=self._parent()))
+                self._error("해제 실패", str(e))
 
         threading.Thread(target=work, daemon=True).start()
 
+    # 결과 알림을 메인 스레드에서 안전하게 (패널이 살아있는 창일 때만).
+    def _info(self, title, msg):
+        self.after(0, lambda: self._box(messagebox.showinfo, title, msg))
 
-class _WebDavEditDialog(ctk.CTkToplevel):
-    """WebDAV 연결 한 건을 추가/편집하는 모달 폼."""
+    def _error(self, title, msg):
+        self.after(0, lambda: self._box(messagebox.showerror, title, msg))
 
-    def __init__(self, master, existing, on_save):
-        super().__init__(master)
-        self.on_save = on_save
-        self.idx = existing[0] if existing else None
-        m = existing[1] if existing else {}
-        self.title("WebDAV 연결 편집" if existing else "새 WebDAV 연결")
-        self.geometry("460x480")
-        self.resizable(False, False)
-        self.transient(master)
-
-        pad = ctk.CTkFrame(self, fg_color="transparent")
-        pad.pack(fill="both", expand=True, padx=22, pady=20)
-
-        def field(label, init="", show=None):
-            ctk.CTkLabel(pad, text=label, text_color=MUTED, anchor="w").pack(fill="x", pady=(8, 0))
-            e = ctk.CTkEntry(pad, width=400, show=show)
-            e.pack(fill="x")
-            if init:
-                e.insert(0, init)
-            return e
-
-        self.e_name = field("이름 (예: 회사 NAS)", m.get("name", ""))
-        self.e_url = field("WebDAV 주소 (예: https://nas.example.com:5006/dav)", m.get("url", ""))
-        self.e_user = field("아이디", m.get("username", ""))
-        self.e_pw = field("비밀번호", secret.decrypt(m.get("password_enc", "")) or "", show="•")
-
-        ctk.CTkLabel(pad, text="드라이브 문자", text_color=MUTED, anchor="w").pack(fill="x", pady=(8, 0))
-        self.cmb_drive = ctk.CTkOptionMenu(pad, values=_DRIVE_LETTERS, width=100)
-        self.cmb_drive.set(m.get("drive", "W:") if m.get("drive", "W:") in _DRIVE_LETTERS else "W:")
-        self.cmb_drive.pack(anchor="w")
-
-        self.var_auto = tk.BooleanVar(value=bool(m.get("auto")))
-        ctk.CTkSwitch(pad, text="프로그램 시작 시 자동 연결", variable=self.var_auto).pack(
-            anchor="w", pady=(12, 0))
-
-        row = ctk.CTkFrame(pad, fg_color="transparent")
-        row.pack(fill="x", pady=(18, 0))
-        ctk.CTkButton(row, text="저장", width=90, command=self._save,
-                      fg_color=ACCENT, hover_color=ACCENT_HOVER).pack(side="right")
-        ctk.CTkButton(row, text="취소", width=80, command=self.destroy,
-                      fg_color="transparent", border_width=1, text_color=MUTED,
-                      hover_color=("gray90", "gray25")).pack(side="right", padx=(0, 8))
-
-        self.after(120, self._raise)
-        # 창이 뜬 뒤 모달로 잡는다 (grab_set 은 뷰가 보인 뒤 호출해야 안정적).
-        self.after(200, lambda: self._safe_grab())
-
-    def _raise(self):
+    def _box(self, fn, title, msg):
         try:
-            self.lift(); self.e_url.focus_set()
+            fn(title, msg, parent=self.winfo_toplevel())
         except Exception:
             pass
-
-    def _safe_grab(self):
-        try:
-            self.grab_set()
-        except Exception:
-            pass
-
-    def _save(self):
-        url = self.e_url.get().strip()
-        if not url:
-            messagebox.showwarning("입력 필요", "WebDAV 주소를 입력하세요.", parent=self)
-            return
-        if "://" not in url:
-            url = "https://" + url            # 스킴 없으면 https (포트는 그대로 보존)
-        # http(비암호화)면 비밀번호가 평문으로 전송될 수 있음을 경고하고 확인받는다.
-        if url.lower().startswith("http://"):
-            if not messagebox.askyesno(
-                    "보안 경고",
-                    "http(암호화 안 됨) 주소입니다. 비밀번호가 네트워크에 평문으로 전송될 수 있고,\n"
-                    "Windows도 기본적으로 http WebDAV의 Basic 인증을 막습니다.\n\n"
-                    "가능하면 https 를 쓰세요. 그래도 이대로 저장할까요?",
-                    parent=self):
-                return
-        drive = self.cmb_drive.get()
-        entry = {
-            "name": self.e_name.get().strip(),
-            "url": url.rstrip("/"),
-            "username": self.e_user.get().strip(),
-            "password_enc": secret.encrypt(self.e_pw.get()) or "",
-            "drive": drive,
-            "auto": bool(self.var_auto.get()),
-        }
-        self.on_save(self.idx, entry)
-        self.destroy()

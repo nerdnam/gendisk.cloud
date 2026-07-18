@@ -19,7 +19,7 @@ from .config import Config
 from .drive import DriveController
 from .engine import SyncEngine
 from .icon import icon_path, render_icon
-from .webdav_manager import WebDavManager
+from .webdav_manager import WebDavPanel
 from .webdav_mount import (
     cleanup_stale_webdav, connect_drive, connect_url, disconnect_drive,
     start_webclient_elevated, webclient_running)
@@ -237,6 +237,9 @@ class App:
 
         self.login_frame = self._build_login(self.container)
         self.settings_frame = self._build_settings(self.container)
+        # WebDAV 프로파일 관리 화면 — 팝업이 아니라 메인 창 안에서 전환된다.
+        self.webdav_frame = WebDavPanel(
+            self.container, self.cfg, self.log, on_close=self._close_webdav)
 
         # macOS 앱과 동일: 로그인돼 있으면 설정 화면, 아니면 로그인 화면부터.
         if self.cfg.token:
@@ -247,12 +250,29 @@ class App:
 
     def _show_login(self):
         self.settings_frame.pack_forget()
+        self.webdav_frame.pack_forget()
         self.login_frame.pack(fill="both", expand=True)
 
     def _show_settings(self):
         self.login_frame.pack_forget()
+        self.webdav_frame.pack_forget()
         self._refresh_account_labels()
         self.settings_frame.pack(fill="both", expand=True)
+
+    def _show_webdav(self):
+        """WebDAV 프로파일 관리 화면으로 전환 (메인 창 안에서)."""
+        self.login_frame.pack_forget()
+        self.settings_frame.pack_forget()
+        self.webdav_frame.show_list()      # 최신 목록으로 갱신
+        self.webdav_frame.pack(fill="both", expand=True)
+
+    def _close_webdav(self):
+        """WebDAV 화면에서 '뒤로' — 로그인돼 있으면 설정, 아니면 로그인 화면으로."""
+        self.webdav_frame.pack_forget()
+        if self.cfg.token:
+            self._show_settings()
+        else:
+            self._show_login()
 
     # ---------- 로그인 화면 ----------
     def _build_login(self, parent):
@@ -420,7 +440,7 @@ class App:
         ctk.CTkButton(c, text="🧹 끊긴 WebDAV 연결 정리", command=self._cleanup_webdav,
                       fg_color="transparent", border_width=1,
                       text_color=MUTED, hover_color=("gray90", "gray25")).pack(fill="x", pady=(6, 0))
-        ctk.CTkButton(c, text="🌐 일반 WebDAV 서버 연결…", command=self._open_webdav_manager,
+        ctk.CTkButton(c, text="🌐 일반 WebDAV 서버 관리…", command=self._show_webdav,
                       fg_color="transparent", border_width=1,
                       text_color=ACCENT, hover_color=("gray90", "gray25")).pack(fill="x", pady=(6, 0))
 
@@ -546,10 +566,9 @@ class App:
             self.lbl_login_error.configure(text=err)
             return
         self._save_webdav_mount(url, user, pw, drive)
-        self.log(f"[WebDAV] {drive} 드라이브로 연결했습니다: {url}")
-        messagebox.showinfo(
-            "연결됨", f"{drive} 드라이브로 연결했습니다.\n탐색기에서 확인하세요.")
-        self._open_webdav_manager(collect=False)
+        self.log(f"[WebDAV] {drive} 드라이브로 연결했습니다 (탐색기에서 확인): {url}")
+        # 팝업 없이 메인 창을 WebDAV 관리 화면으로 전환 — 전환 자체가 성공 신호다.
+        self._show_webdav()
 
     def _save_webdav_mount(self, url, user, pw, drive):
         """방금 연결한 WebDAV 를 저장 목록에 추가/갱신(같은 url+drive 는 갱신)."""
@@ -806,20 +825,6 @@ class App:
             self.log(f"{self.cmb_drive.get()} 연결을 해제했습니다.")
         except Exception as e:
             messagebox.showerror("연결 해제 실패", str(e))
-
-    def _open_webdav_manager(self, collect: bool = True):
-        """일반(범용) WebDAV 서버 연결 관리 창을 연다.
-        collect=False 는 로그인 화면에서 열 때(설정 위젯 값 수집 불필요)."""
-        if collect:
-            self._collect()   # 설정 화면 값 반영 (그래야 관리자에서 cfg.save 시 유실 없음)
-        try:
-            win = getattr(self, "_webdav_win", None)
-            if win is not None and win.winfo_exists():
-                win.lift(); win.focus_force()
-                return
-            self._webdav_win = WebDavManager(self.root, self.cfg, self.log)
-        except Exception as e:  # noqa: BLE001
-            messagebox.showerror("일반 WebDAV", f"창을 열 수 없습니다: {e}")
 
     def _auto_connect_webdav_mounts(self):
         """저장된 일반 WebDAV 연결 중 'auto' 항목을 시작 시 마운트한다 (백그라운드)."""
