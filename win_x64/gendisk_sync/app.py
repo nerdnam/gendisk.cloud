@@ -78,6 +78,13 @@ class SyncWorker(threading.Thread):
 class App:
     def __init__(self, startup: bool = False):
         self.cfg = Config.load()
+        # 자동시작이 켜져 있으면 Run 키를 현재 exe(안정 사본) 경로로 자가 치유한다.
+        # (바탕화면 exe 를 지우거나 이름을 바꿔도 자동시작이 계속 동작하도록)
+        if self.cfg.auto_start:
+            try:
+                autostart.sync(True)
+            except Exception:
+                pass
         # 저장된 화면 테마(light/dark/system) 적용
         ctk.set_appearance_mode(self.cfg.appearance if self.cfg.appearance in _THEME_MODES.values() else "system")
         # 이번 세션의 비밀번호(WebDAV 드라이브 연결용). 저장 여부와 무관하게 메모리에 보관.
