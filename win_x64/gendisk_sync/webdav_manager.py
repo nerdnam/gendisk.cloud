@@ -36,7 +36,7 @@ class WebDavManager(ctk.CTkToplevel):
 
     def __init__(self, master, cfg, log):
         super().__init__(master)
-        self._root = master          # 항상 살아있는 상위 창(App.root) — 결과 콜백 마셜링용
+        self._owner = master          # 항상 살아있는 상위 창(App.root) — 결과 콜백 마셜링용
         self.cfg = cfg
         self.log = log
         self.title("일반 WebDAV 서버")
@@ -67,16 +67,16 @@ class WebDavManager(ctk.CTkToplevel):
         """워커 스레드의 결과 콜백을 항상 살아있는 루트 이벤트루프로 넘긴다.
         (관리자 창이 그 사이 닫혀도 destroy 된 Toplevel 에 after 를 걸어 TclError 나지 않도록)"""
         try:
-            self._root.after(0, fn)
+            self._owner.after(0, fn)
         except Exception:
             pass
 
     def _parent(self):
         """messagebox 부모: 관리자 창이 아직 살아있으면 그 위, 닫혔으면 루트."""
         try:
-            return self if self.winfo_exists() else self._root
+            return self if self.winfo_exists() else self._owner
         except Exception:
-            return self._root
+            return self._owner
 
     def _build(self):
         head = ctk.CTkFrame(self, fg_color="transparent")
