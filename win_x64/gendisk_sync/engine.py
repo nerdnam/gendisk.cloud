@@ -176,8 +176,9 @@ class SyncEngine:
 
     # ---------- 전송 ----------
     def _upload(self, rel):
-        data = (self.root / rel).read_bytes()
-        self.client.put(self.space, rel, data)
+        # 큰 파일은 자동으로 청크(분할)·스트리밍 업로드로 전환 — 앞단(Cloudflare 100MB 등)
+        # 요청당 제한을 우회하고 파일 전체를 메모리에 올리지 않는다.
+        self.client.put_smart(self.space, rel, self.root / rel)
         self.log(f"  ↑ {rel}")
 
     def _download(self, rel, etag):

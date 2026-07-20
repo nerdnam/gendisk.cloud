@@ -4,9 +4,15 @@
 이후 요청에 Authorization: Bearer 로 실어 보낸다 (서버가 쿠키/Bearer 둘 다 허용).
 """
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+# 청크(분할) 업로드: 이보다 큰 파일은 조각으로 나눠 올려 앞단(Cloudflare 100MB 등)의
+# 요청당 크기 제한·단일 요청 타임아웃을 우회하고, 파일 전체를 메모리에 올리지 않는다.
+CHUNK_THRESHOLD = 48 * 1024 * 1024
+CHUNK_SIZE = 16 * 1024 * 1024
 
 # 기본 urllib UA(Python-urllib/x)는 Cloudflare 등 WAF가 봇으로 보고 차단(error 1010)한다.
 # 브라우저 형태 + 앱 식별자를 함께 보내 정상 클라이언트로 인식되게 한다.
@@ -236,6 +242,68 @@ class GenDiskClient:
         return self._json("POST", "/api/sync/put",
                          params={"space": space, "path": path},
                          data=data, content_type="application/octet-stream")
+
+    # ---------- 청크(분할) 업로드 ----------
+    def put_smart(self, space: str, path: str, local_path) -> None:
+        """크기에 따라 업로드 방식을 고른다: 큰 파일은 조각으로 나눠(디스크에서 스트리밍)
+        올려 앞단 제한·타임아웃을 우회하고 메모리도 아낀다. 작은 파일은 기존 한 방 업로드.
+        같은 경로를 원자적으로 덮어써(overwrite) 동기화 재시도 멱등성을 지킨다."""
+        from pathlib import Path
+        p = Path(local_path)
+        size = p.stat().st_size
+        if size <= CHUNK_THRESHOLD:
+            self.put(space, path, p.read_bytes())
+            return
+        upload_id = self._upload_init(space, path, size)
+        with p.open("rb") as f:
+            offset = 0
+            while True:
+                chunk = f.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                self._upload_chunk(upload_id, offset, chunk)
+                offset += len(chunk)
+        self._upload_complete(upload_id)
+
+    def _upload_init(self, space: str, path: str, size: int) -> str:
+        # path="" + rel=<정확한 상대경로>, overwrite=True → 서버가 그 경로를 원자적으로 덮어씀
+        res = self._json("POST", "/api/files/upload/init",
+                        json_body={"space": space, "path": "", "rel": path,
+                                   "size": int(size), "overwrite": True})
+        return res["upload_id"]
+
+    def _upload_status(self, upload_id: str) -> int:
+        return self._json("GET", "/api/files/upload/status",
+                         params={"upload_id": upload_id})["received"]
+
+    def _upload_chunk(self, upload_id: str, offset: int, chunk: bytes) -> None:
+        attempt = 0
+        while True:
+            try:
+                self._json("PUT", "/api/files/upload/chunk",
+                          params={"upload_id": upload_id, "offset": str(offset)},
+                          data=chunk, content_type="application/octet-stream")
+                return
+            except ApiError as e:
+                if e.status == 409:
+                    # offset 불일치 → 서버가 실제로 받은 지점 확인 후 판단
+                    cur = self._upload_status(upload_id)
+                    if cur == offset + len(chunk):
+                        return                      # 이 조각은 이미 반영됨
+                    if cur != offset:
+                        raise                       # 재동기화 불가
+                    # cur == offset 이면 아래로 떨어져 재전송
+                else:
+                    raise
+            except OSError:                         # 네트워크 오류(URLError 포함) → 백오프 재시도
+                attempt += 1
+                if attempt > 4:
+                    raise
+                time.sleep(0.5 * attempt)
+
+    def _upload_complete(self, upload_id: str) -> dict:
+        return self._json("POST", "/api/files/upload/complete",
+                         params={"upload_id": upload_id})
 
     def list_dir(self, space: str, path: str = "") -> list[dict]:
         """폴더의 직속 항목 목록. [{name, path, is_dir, size, ...}] (온디맨드 채우기용)."""
