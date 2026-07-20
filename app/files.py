@@ -542,7 +542,7 @@ def delete(body: PathBody, user: dict = Depends(current_user)):
     from . import shares
     shares.drop_shares_for(user["id"], body.space, body.path)
     notify_change(body.space or HOME_SPACE, parent_of(body.path), user["id"],
-                  private=body.space in ("", HOME_SPACE))
+                  private=body.space in ("", HOME_SPACE), gone=body.path)
     return {"ok": True}
 
 
@@ -567,7 +567,7 @@ def rename(body: RenameBody, user: dict = Depends(current_user)):
     from . import shares
     shares.drop_shares_for(user["id"], body.space, body.path)
     notify_change(body.space or HOME_SPACE, parent_of(body.path), user["id"],
-                  private=body.space in ("", HOME_SPACE))
+                  private=body.space in ("", HOME_SPACE), gone=body.path)
     return {"ok": True}
 
 
@@ -625,7 +625,7 @@ async def move(body: MoveBody, user: dict = Depends(current_user)):
     # 출발 폴더(삭제 반영)와 도착 폴더(생성 반영) 양쪽에 변경을 알린다.
     dst_rel = dst.relative_to(dst_root).as_posix()
     notify_change(ss or HOME_SPACE, parent_of(body.src), user["id"],
-                  private=ss in ("", HOME_SPACE))
+                  private=ss in ("", HOME_SPACE), gone=body.src)
     notify_change(ds or HOME_SPACE, parent_of(dst_rel), user["id"],
                   private=ds in ("", HOME_SPACE))
     return {"ok": True, "path": dst_rel}

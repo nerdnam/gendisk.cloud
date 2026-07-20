@@ -58,9 +58,13 @@ def _mount_allowed_ids(space: str) -> set[int]:
         conn.close()
 
 
-def notify_change(space: str, dir_rel: str, user_id: int, private: bool) -> None:
+def notify_change(
+    space: str, dir_rel: str, user_id: int, private: bool, gone: str | None = None
+) -> None:
     """space 의 dir_rel 폴더에서 내용이 바뀌었음을 구독자들에게 알린다.
 
+    gone: 삭제·이름변경·이동으로 사라진 항목의 (이전) 상대 경로. 동기화 클라이언트가
+    mtime 기반 delta 로는 감지할 수 없는 소멸을 즉시 반영하는 데 쓴다.
     private=True(개인 공간)면 같은 user_id 구독자에게만,
     마운트 공간이면 접근 권한(grant/관리자)이 있는 구독자에게만 보낸다.
     구독자가 없거나 루프가 아직 없으면 조용히 무시한다(비용 0).
@@ -75,9 +79,10 @@ def notify_change(space: str, dir_rel: str, user_id: int, private: bool) -> None
             allowed = _mount_allowed_ids(space)
         except Exception:
             allowed = {user_id}  # 권한 조회 실패 시 안전한 쪽(본인만)으로
-    payload = json.dumps(
-        {"space": space, "dir": (dir_rel or "").strip("/")}, ensure_ascii=False
-    )
+    body = {"space": space, "dir": (dir_rel or "").strip("/")}
+    if gone:
+        body["gone"] = gone.strip("/")
+    payload = json.dumps(body, ensure_ascii=False)
 
     def _emit() -> None:
         for q, uid in list(_subscribers.items()):

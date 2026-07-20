@@ -418,8 +418,9 @@ def _proppatch(space: str, rel: str) -> Response:
 def _notify_dav_change(request, user: dict, method: str, space: str, rel: str) -> None:
     """WebDAV 변경 성공을 실시간 알림 구독자에게 전달한다(실패해도 응답에 영향 없음)."""
     with contextlib.suppress(Exception):
+        gone = rel if method in ("DELETE", "MOVE") else None
         notify_change(space or HOME_SPACE, parent_of(rel), user["id"],
-                      private=_is_home(space))
+                      private=_is_home(space), gone=gone)
         if method in ("MOVE", "COPY"):
             # 도착 폴더에도 알린다 (Destination 헤더 재파싱 — 검증은 이미 끝난 뒤).
             dest = request.headers.get("Destination", "")
