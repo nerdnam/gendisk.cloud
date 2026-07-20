@@ -10,12 +10,20 @@ Provider 인스턴스 속성으로 붙잡아 둔다.
 import ctypes
 import json
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from ctypes import POINTER, byref
 
 from . import cfapi as C
 
 SECTOR = 4096
-CHUNK = 1 << 20  # 1 MiB (4KB 배수)
+# 하이드레이션 전송 조각 크기. 클수록 왕복(라운드트립)이 줄어 대용량 다운로드가 빨라진다.
+# 8 MiB = 4KB 배수. 예전 1 MiB 는 2GB 파일에 ~2300 왕복이 필요해 앱이 취소되곤 했다.
+CHUNK = 8 << 20  # 8 MiB
+# 하이드레이션 시 동시에 받는 조각(=서버 연결) 수. 대역폭을 합산해 대용량 다운로드를
+# 빠르게 한다(특히 Cloudflare 처럼 연결당 속도가 제한될 때 효과적). 메모리는 최대
+# HYDRATE_WORKERS × CHUNK 로 제한된다. 서버·앞단 부하를 보며 조절.
+HYDRATE_WORKERS = 4
 
 
 def _now_filetime() -> int:
@@ -31,7 +39,8 @@ def set_expose_placeholders():
 
 class Provider:
     def __init__(self, root: str, provider_guid: str, fetch_range, list_dir=None,
-                 list_spaces=None, space: str = "home", provider_name: str = "genDISK",
+                 list_spaces=None, upload=None, delete=None, rename=None, notify=None,
+                 space: str = "home", provider_name: str = "genDISK",
                  identity: bytes = b"genDISK", log=print):
         self.root = os.path.abspath(root)
         self.provider_guid = provider_guid
@@ -40,9 +49,20 @@ class Provider:
         self.fetch_range = fetch_range      # (meta:dict, offset:int, length:int) -> bytes
         self.list_dir = list_dir            # (space:str, rel_posix:str) -> [entry dict]
         self.list_spaces = list_spaces      # () -> [{id,name,readonly}] (다중 저장소 모드)
+        self.upload = upload                # (space:str, path:str, local_path:str) -> None (로컬→원격)
+        self.delete = delete                # (space:str, path:str) -> None (로컬 삭제 → 서버 삭제)
+        self.rename = rename                # (space:str, src:str, dst:str) -> None (이름변경/이동)
+        self.notify = notify                # (msg:str) -> None (토스트 알림, 업로드 진행 표시용)
         self.space = space
         self.log = log
         self._space_map = {}                # 폴더이름 -> space id (다중 저장소)
+        # 원격 변경 반영(refresh)용: 지금까지 실제로 열려 채워진 폴더들의 rel 경로.
+        # refresh 는 이 폴더들만 서버와 대조해 새 항목을 추가한다(온디맨드 유지 + 작업량 최소).
+        self._populated_dirs = set()
+        self._ph_lock = threading.Lock()    # CfCreatePlaceholders 동시호출 직렬화
+        self._hydrate_pool = None           # 병렬 다운로드 워커 풀(지연 생성)
+        self._upload_seen = {}              # frel -> (size, mtime_ns): 안정성 대기 추적
+        self._upload_done = {}              # frel -> (size, mtime_ns): 이미 업로드한 버전(재업로드 방지)
         # 볼륨 상대 루트 경로(콜백의 NormalizedPath 는 드라이브 문자 없는 볼륨 상대 경로)
         self._root_volrel = os.path.splitdrive(self.root)[1]
         self.conn_key = None
@@ -50,6 +70,8 @@ class Provider:
         # GC 방지용 참조 보관
         self._cb_fetch_data = None
         self._cb_fetch_ph = None
+        self._cb_delete = None
+        self._cb_rename = None
         self._cb_table = None
         self._reg_idbuf = None
 
@@ -89,15 +111,23 @@ class Provider:
 
     # ------------------------------------------------------------------ 연결
     def connect(self):
-        regs = (C.CF_CALLBACK_REGISTRATION * 3)()
+        regs = (C.CF_CALLBACK_REGISTRATION * 5)()
         self._cb_fetch_data = C.CF_CALLBACK(self._on_fetch_data)
         self._cb_fetch_ph = C.CF_CALLBACK(self._on_fetch_placeholders)
+        self._cb_delete = C.CF_CALLBACK(self._on_delete)
+        self._cb_rename = C.CF_CALLBACK(self._on_rename)
         regs[0].Type = C.CF_CALLBACK_TYPE_FETCH_DATA
         regs[0].Callback = self._cb_fetch_data
         regs[1].Type = C.CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS
         regs[1].Callback = self._cb_fetch_ph
-        regs[2].Type = C.CF_CALLBACK_TYPE_NONE            # 종료 표식
-        regs[2].Callback = C.CF_CALLBACK()               # NULL
+        # 로컬 삭제 완료 후 알림 → 서버에서도 삭제 전파(사후 알림이라 삭제를 막지 않음).
+        regs[2].Type = C.CF_CALLBACK_TYPE_DELETE_COMPLETION
+        regs[2].Callback = self._cb_delete
+        # 로컬 이름변경/이동 완료 후 알림 → 서버에서도 이동 전파.
+        regs[3].Type = C.CF_CALLBACK_TYPE_RENAME_COMPLETION
+        regs[3].Callback = self._cb_rename
+        regs[4].Type = C.CF_CALLBACK_TYPE_NONE            # 종료 표식
+        regs[4].Callback = C.CF_CALLBACK()               # NULL
         self._cb_table = regs
 
         conn = C.CF_CONNECTION_KEY()
@@ -152,23 +182,200 @@ class Provider:
         raw = self.list_dir(self.space, rel) if self.list_dir else []
         return [dict(e, _space=self.space) for e in raw]
 
+    def _create_placeholders_in(self, dir_fullpath: str, entries) -> int:
+        """로컬 폴더(dir_fullpath)에 entries 를 플레이스홀더로 생성한다. 생성 개수 반환.
+        CfCreatePlaceholders 동시호출은 락으로 직렬화(백그라운드 refresh vs 콜백 경쟁 방지)."""
+        if not entries:
+            return 0
+        arr, keep = self._build_placeholders(entries)  # noqa: F841 (호출 동안 살려둔다)
+        processed = C.DWORD(0)
+        with self._ph_lock:
+            hr = C.CfCreatePlaceholders(dir_fullpath, arr, len(entries),
+                                        C.CF_CREATE_FLAG_NONE, byref(processed))
+        if not C.hr_ok(hr):
+            raise OSError(f"CfCreatePlaceholders({dir_fullpath}) {C.hr_str(hr)}")
+        return processed.value
+
     def populate_root(self):
         """드라이브 루트를 플레이스홀더로 심는다(다중 저장소면 저장소 폴더들, 아니면 최상위 파일)."""
         entries = self._children_for("")
+        self._populated_dirs.add("")
         existing = set(os.listdir(self.root)) if os.path.isdir(self.root) else set()
         fresh = [e for e in entries if e["name"] not in existing]
         if not fresh:
             self.log(f"[vfs] populate_root: nothing new ({len(entries)} entries)")
             return
-        arr, keep = self._build_placeholders(fresh)  # noqa: F841
-        processed = C.DWORD(0)
-        hr = C.CfCreatePlaceholders(self.root, arr, len(fresh),
-                                    C.CF_CREATE_FLAG_NONE, byref(processed))
-        if not C.hr_ok(hr):
-            raise OSError(f"CfCreatePlaceholders(root) {C.hr_str(hr)}")
-        self.log(f"[vfs] populate_root: seeded {processed.value}/{len(fresh)}")
+        n = self._create_placeholders_in(self.root, fresh)
+        self.log(f"[vfs] populate_root: seeded {n}/{len(fresh)}")
+
+    def refresh(self) -> int:
+        """서버와 다시 대조해 다른 기기(폰/웹)가 올린 새 파일을 placeholder 로 추가한다
+        → 드라이브에 나타난다. 이미 열려서 DISABLE_ON_DEMAND_POPULATION 로 '고정'된 폴더도
+        CfCreatePlaceholders 로 새 항목을 넣을 수 있으므로, 고정된 폴더의 갱신도 이걸로 해결한다.
+
+        대상: (1) 루트, (2) 최상위 저장소 폴더(내 파일=home 등) — 비어 있어도 항상,
+        (3) 이번 세션에 연 폴더들(_populated_dirs). (2)가 핵심: 홈이 한 번 열려 고정된 뒤
+        새 파일이 안 뜨던 문제를 잡는다.
+
+        안전 원칙: '추가'만 한다(원격 삭제/수정은 건드리지 않음 → 데이터 손실 방지)."""
+        if self.list_dir is None:
+            return 0
+        targets = set(self._populated_dirs)
+        targets.add("")
+        if self.list_spaces is not None:            # 다중 저장소: 저장소 폴더는 늘 새로고침
+            if not self._space_map:
+                try:
+                    self._space_entries()
+                except Exception:  # noqa: BLE001
+                    pass
+            targets.update(self._space_map.keys())
+        added = 0
+        for rel in list(targets):
+            local = self.root if rel == "" else os.path.join(
+                self.root, rel.replace("/", os.sep))
+            if not os.path.isdir(local):
+                continue
+            try:
+                entries = self._children_for(rel)
+                existing = set(os.listdir(local))
+            except Exception as e:  # noqa: BLE001
+                self.log(f"[vfs] refresh '{rel}' skip: {e!r}")
+                continue
+            fresh = [e for e in entries if e["name"] not in existing]
+            if fresh:
+                try:
+                    n = self._create_placeholders_in(local, fresh)
+                    added += n
+                    self.log(f"[vfs] refresh '{rel or '/'}': +{n}")
+                except OSError as e:
+                    self.log(f"[vfs] refresh create '{rel}': {e!r}")
+        if added:
+            self.log(f"[vfs] refresh: +{added} new placeholder(s) total")
+        return added
+
+    # ---------------------------------------------------------------- 로컬→원격 업로드
+    def _upload_target(self, frel: str):
+        """드라이브 상대경로(frel) → (space_id, 서버 경로). 매핑 불가면 None."""
+        if self.list_spaces is not None:
+            if not self._space_map:
+                try:
+                    self._space_entries()
+                except Exception:  # noqa: BLE001
+                    return None
+            parts = frel.split("/")
+            sid = self._space_map.get(parts[0])
+            if sid is None:
+                return None
+            return sid, "/".join(parts[1:])
+        return self.space, frel
+
+    def _mark_uploaded(self, local_path: str, identity: dict):
+        """업로드된 실제 파일을 in-sync 플레이스홀더로 변환 → '동기화 보류중' 해소."""
+        ident = json.dumps(identity).encode("utf-8")
+        idbuf = ctypes.create_string_buffer(ident, len(ident))
+        h = C.CreateFileW(local_path, C.GENERIC_READ | C.GENERIC_WRITE,
+                          C.FILE_SHARE_READ | C.FILE_SHARE_WRITE | C.FILE_SHARE_DELETE,
+                          None, C.OPEN_EXISTING, C.FILE_FLAG_BACKUP_SEMANTICS, None)
+        if not h or h == C.INVALID_HANDLE_VALUE:
+            raise OSError(f"CreateFileW 실패(err={ctypes.get_last_error()}): {local_path}")
+        try:
+            hr = C.CfConvertToPlaceholder(h, ctypes.cast(idbuf, C.LPCVOID), len(ident),
+                                          C.CF_CONVERT_FLAG_MARK_IN_SYNC, None, None)
+            if not C.hr_ok(hr):
+                raise OSError(f"CfConvertToPlaceholder {C.hr_str(hr)}")
+        finally:
+            C.CloseHandle(h)
+
+    def upload_scan(self) -> int:
+        """드라이브에 새로 드롭된 '실제 파일'(플레이스홀더 아님)을 찾아 서버로 올리고
+        in-sync 플레이스홀더로 바꿔 '동기화 보류중'을 해소한다.
+        - 플레이스홀더(우리 파일)는 reparse point 로 판별해 건너뛴다.
+        - 두 폴 주기 동안 크기·수정시각이 안 변한 '안정된' 파일만 올린다(쓰는 중 방지).
+        - 이미 올린 버전은 재업로드하지 않는다.
+        대상 폴더는 refresh 와 동일(루트 + 저장소 폴더 + 이번 세션에 연 폴더)."""
+        if self.upload is None:
+            return 0
+        targets = set(self._populated_dirs)
+        targets.add("")
+        if self.list_spaces is not None:
+            if not self._space_map:
+                try:
+                    self._space_entries()
+                except Exception:  # noqa: BLE001
+                    pass
+            targets.update(self._space_map.keys())
+        uploaded = 0
+        live = set()
+        for rel in list(targets):
+            local = self.root if rel == "" else os.path.join(
+                self.root, rel.replace("/", os.sep))
+            if not os.path.isdir(local):
+                continue
+            try:
+                entries = list(os.scandir(local))
+            except OSError:
+                continue
+            for de in entries:
+                try:
+                    if not de.is_file(follow_symlinks=False):
+                        continue
+                    st = de.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                name = de.name
+                if name.lower() == "desktop.ini" or name.startswith("."):
+                    continue
+                # 우리 파일(in-sync 플레이스홀더 — 다운로드했거나 이미 올린 것)은 건너뛰고,
+                # 아직 서버에 없는(신규/보류) 파일만 올린다. reparse 유무가 아니라 in-sync 로 판별해
+                # Windows 가 드롭 파일을 곧바로 placeholder 로 만들어도 놓치지 않는다.
+                state = C.CfGetPlaceholderStateFromAttributeTag(
+                    getattr(st, "st_file_attributes", 0), getattr(st, "st_reparse_tag", 0))
+                if state != C.CF_PLACEHOLDER_STATE_INVALID and (
+                        state & C.CF_PLACEHOLDER_STATE_IN_SYNC):
+                    continue
+                frel = name if rel == "" else rel + "/" + name
+                key = (st.st_size, st.st_mtime_ns)
+                live.add(frel)
+                if self._upload_done.get(frel) == key:      # 이미 이 버전 올림
+                    continue
+                if self._upload_seen.get(frel) != key:      # 아직 변하는 중 → 다음 폴에서 재확인
+                    self._upload_seen[frel] = key
+                    continue
+                tgt = self._upload_target(frel)             # 안정됨 → 업로드
+                if tgt is None:
+                    continue
+                sid, server_path = tgt
+                if not server_path:
+                    continue
+                try:
+                    if self.notify:
+                        self.notify(f"⬆ 업로드 중: {name}")
+                    self.upload(sid, server_path, de.path)
+                    self._upload_done[frel] = key           # 재업로드 방지(변환 실패해도 서버엔 올라감)
+                    try:
+                        self._mark_uploaded(
+                            de.path, {"space": sid, "path": server_path, "dir": False})
+                    except Exception as e:  # noqa: BLE001
+                        self.log(f"[vfs] mark in-sync '{frel}': {e!r} (서버 업로드는 성공)")
+                    uploaded += 1
+                    self._upload_seen.pop(frel, None)
+                    self.log(f"[vfs] uploaded '{frel}' -> {sid}:{server_path}")
+                    if self.notify:
+                        self.notify(f"✅ 업로드 완료: {name}")
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"[vfs] upload '{frel}' error: {e!r}")
+                    if self.notify:
+                        self.notify(f"⚠ 업로드 실패: {name}")
+        for k in [k for k in self._upload_seen if k not in live]:
+            self._upload_seen.pop(k, None)
+        if uploaded:
+            self.log(f"[vfs] upload_scan: {uploaded} file(s)")
+        return uploaded
 
     def disconnect(self):
+        if self._hydrate_pool is not None:
+            self._hydrate_pool.shutdown(wait=False)   # 진행 중 다운로드는 알아서 끝남
+            self._hydrate_pool = None
         if self._connected and self.conn_key is not None:
             hr = C.CfDisconnectSyncRoot(self.conn_key)
             self.log(f"[vfs] disconnect -> {C.hr_str(hr)}")
@@ -226,10 +433,13 @@ class Provider:
                 raw = ctypes.string_at(info.FileIdentity, info.FileIdentityLength)
                 meta = json.loads(raw.decode("utf-8"))
             path = info.NormalizedPath or ""
+            rel = self._rel_from_normalized(path)
+            local_path = self.root if rel == "" else os.path.join(
+                self.root, rel.replace("/", os.sep))
             self.log(f"[vfs] FETCH_DATA {path} off={req_off} len={req_len} "
                      f"size={file_size} meta={meta}")
             self._hydrate(info.ConnectionKey, info.TransferKey,
-                          meta, file_size, req_off, req_len)
+                          meta, file_size, req_off, req_len, local_path)
         except Exception as e:  # noqa: BLE001
             self.log(f"[vfs] FETCH_DATA error: {e!r}")
             if info is not None:
@@ -239,22 +449,54 @@ class Provider:
                 except Exception as e2:  # noqa: BLE001
                     self.log(f"[vfs] fail-report error: {e2!r}")
 
-    def _hydrate(self, conn, xfer, meta, file_size, req_off, req_len):
+    def _pool(self) -> ThreadPoolExecutor:
+        if self._hydrate_pool is None:
+            self._hydrate_pool = ThreadPoolExecutor(
+                max_workers=HYDRATE_WORKERS, thread_name_prefix="gendisk-hydrate")
+        return self._hydrate_pool
+
+    def _hydrate(self, conn, xfer, meta, file_size, req_off, req_len, local_path=None):
         start = req_off - (req_off % SECTOR)
         req_end = req_off + req_len
         end = min(file_size, ((req_end + SECTOR - 1) // SECTOR) * SECTOR)
         if end <= start:
             end = min(file_size, start + SECTOR)
-        pos = start
-        while pos < end:
-            want = min(CHUNK, end - pos)
-            data = self.fetch_range(meta, pos, want)
-            if not data:
-                raise IOError(f"빈 응답 off={pos} want={want}")
-            self._transfer(conn, xfer, pos, data)
-            pos += len(data)
+        offsets = list(range(start, end, CHUNK))
+        if not offsets:
+            return
 
-    def _transfer(self, conn, xfer, offset, data: bytes):
+        def fetch(off):
+            # Range 응답은 정확히 요청 길이만 준다(서버 206). want 만큼만 받아 조각이 딱 맞는다.
+            return self.fetch_range(meta, off, min(CHUNK, end - off))
+
+        # 여러 조각을 동시에 다운로드(프리페치)하되 전송은 순서대로(이 콜백 스레드에서만) 한다.
+        # → 네트워크(느림)는 병렬로 대역폭을 합치고, CfExecute(빠름)는 직렬이라 스레드 안전.
+        # 메모리는 창(window=HYDRATE_WORKERS) 크기로 제한된다.
+        pool = self._pool()
+        inflight = {}       # index -> Future(bytes)
+        nxt = 0
+        transferred = 0
+        while nxt < len(offsets) and len(inflight) < HYDRATE_WORKERS:
+            inflight[nxt] = pool.submit(fetch, offsets[nxt]); nxt += 1
+        for i in range(len(offsets)):
+            data = inflight.pop(i).result()
+            if nxt < len(offsets):          # 창 유지: 다음 조각 미리 제출
+                inflight[nxt] = pool.submit(fetch, offsets[nxt]); nxt += 1
+            if not data:
+                raise IOError(f"빈 응답 off={offsets[i]}")
+            if not self._transfer(conn, xfer, offsets[i], data):
+                # 앱이 취소(썸네일 종료·파일 닫힘 등) — 정상. 남은 in-flight 는 알아서 끝나고 버려진다.
+                self.log(f"[vfs] hydrate canceled at off={offsets[i]} (정상)")
+                # 큰 다운로드가 중간에 취소되면 부분 데이터로 파일이 꼬이지 않게(과거 손상 원인)
+                # 백그라운드에서 깨끗한 플레이스홀더로 되돌린다(best-effort). 작은 미리보기는 제외.
+                if transferred > CHUNK and local_path:
+                    self._schedule_dehydrate(local_path)
+                return
+            transferred += len(data)
+
+    def _transfer(self, conn, xfer, offset, data: bytes) -> bool:
+        """데이터 한 조각을 Windows 로 전송. 성공 True, 앱이 취소했으면 False(중단 신호),
+        그 외 실패는 예외."""
         op = C.CF_OPERATION_INFO()
         op.StructSize = ctypes.sizeof(C.CF_OPERATION_INFO)
         op.Type = C.CF_OPERATION_TYPE_TRANSFER_DATA
@@ -269,8 +511,11 @@ class Provider:
         p.Offset = offset
         p.Length = len(data)
         hr = C.CfExecute(byref(op), ctypes.cast(byref(p), C.LPCVOID))
+        if C.is_canceled(hr):
+            return False
         if not C.hr_ok(hr):
             raise OSError(f"CfExecute(TRANSFER_DATA) {C.hr_str(hr)}")
+        return True
 
     def _transfer_fail(self, conn, xfer, offset, length):
         """하이드레이션 실패를 Windows 에 알려 열기가 매달리지 않게 한다."""
@@ -287,6 +532,72 @@ class Provider:
         p.Offset = offset
         p.Length = max(0, length)
         C.CfExecute(byref(op), ctypes.cast(byref(p), C.LPCVOID))
+
+    # ------------------------------------------------------------ 삭제 전파 / 손상 복구
+    def _on_delete(self, info_p, params_p):
+        """로컬에서 파일/폴더 삭제가 끝난 뒤 알림 → 서버에서도 삭제한다.
+        (DELETE_COMPLETION 은 사후 알림이라 로컬 삭제를 막거나 지연시키지 않는다.)"""
+        try:
+            info = info_p[0]
+            rel = self._rel_from_normalized(info.NormalizedPath)
+            if not rel:
+                return
+            self._upload_seen.pop(rel, None)
+            self._upload_done.pop(rel, None)
+            tgt = self._upload_target(rel)
+            if tgt is None or not tgt[1] or self.delete is None:
+                return
+            sid, server_path = tgt
+            self.delete(sid, server_path)
+            self.log(f"[vfs] deleted on server: {sid}:{server_path}")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[vfs] delete propagate error: {e!r}")
+
+    def _on_rename(self, info_p, params_p):
+        """로컬 이름변경/이동 완료 후 → 서버에서도 이동(move). 같은 저장소 안에서만."""
+        try:
+            info = info_p[0]
+            rp = ctypes.cast(params_p, POINTER(C.RENAME_COMPLETION_PARAMS))[0]
+            old_rel = self._rel_from_normalized(rp.SourcePath or "")
+            new_rel = self._rel_from_normalized(info.NormalizedPath or "")
+            if not old_rel or not new_rel or old_rel == new_rel:
+                return
+            for m in (self._upload_seen, self._upload_done):
+                m.pop(old_rel, None)
+            o = self._upload_target(old_rel)
+            n = self._upload_target(new_rel)
+            if not o or not n or not o[1] or not n[1] or self.rename is None:
+                return
+            if o[0] != n[0]:
+                self.log(f"[vfs] rename across spaces unsupported: {old_rel} -> {new_rel}")
+                return
+            self.rename(o[0], o[1], n[1])
+            self.log(f"[vfs] renamed on server: {o[0]}: {o[1]} -> {n[1]}")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[vfs] rename propagate error: {e!r}")
+
+    def _schedule_dehydrate(self, local_path: str):
+        threading.Thread(target=self._dehydrate, args=(local_path,),
+                         name="gendisk-dehydrate", daemon=True).start()
+
+    def _dehydrate(self, local_path: str):
+        """플레이스홀더를 온디맨드(빈) 상태로 되돌린다 — 취소로 남은 부분 데이터를 버려
+        파일이 꼬이지 않게 하고, 다음에 열면 깨끗하게 다시 받는다. best-effort."""
+        h = C.CreateFileW(local_path, C.GENERIC_READ | C.GENERIC_WRITE,
+                          C.FILE_SHARE_READ | C.FILE_SHARE_WRITE | C.FILE_SHARE_DELETE,
+                          None, C.OPEN_EXISTING, C.FILE_FLAG_BACKUP_SEMANTICS, None)
+        if not h or h == C.INVALID_HANDLE_VALUE:
+            return   # 사용 중 등으로 못 열면 조용히 포기
+        try:
+            hr = C.CfDehydratePlaceholder(h, 0, -1, C.CF_DEHYDRATE_FLAG_NONE, None)
+            if C.hr_ok(hr):
+                self.log(f"[vfs] reset(dehydrate) {local_path}")
+            else:
+                self.log(f"[vfs] dehydrate {C.hr_str(hr)}: {local_path}")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[vfs] dehydrate error: {e!r}")
+        finally:
+            C.CloseHandle(h)
 
     # 콜백의 NormalizedPath(볼륨 상대) → 서버 상대 경로(posix)
     def _rel_from_normalized(self, normp: str) -> str:
@@ -331,6 +642,7 @@ class Provider:
         try:
             info = info_p[0]
             rel = self._rel_from_normalized(info.NormalizedPath)
+            self._populated_dirs.add(rel)   # refresh(원격 변경 반영) 대상에 포함
             entries = self._children_for(rel)
             self.log(f"[vfs] FETCH_PLACEHOLDERS dir='{rel}' -> {len(entries)} entries")
             arr, keep = self._build_placeholders(entries)  # noqa: F841 (keep alive)

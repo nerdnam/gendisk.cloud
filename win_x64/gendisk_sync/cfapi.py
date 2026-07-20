@@ -209,6 +209,18 @@ class FETCH_PLACEHOLDERS_PARAMS(ctypes.Structure):
     ]
 
 
+# RENAME_COMPLETION 콜백 파라미터: { Flags(DWORD); PCWSTR SourcePath; }
+# 레이아웃은 FETCH_PLACEHOLDERS_PARAMS 와 동일(끝에 LPCWSTR). SourcePath = 이름변경 전 경로.
+class RENAME_COMPLETION_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("ParamSize", ULONG),
+        ("_pad0", ULONG),
+        ("Flags", DWORD),
+        ("_pad1", ULONG),
+        ("SourcePath", LPCWSTR),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 플레이스홀더 생성
 # ---------------------------------------------------------------------------
@@ -269,6 +281,14 @@ CF_OPERATION_TYPE_ACK_RENAME = 7
 CF_OPERATION_TRANSFER_DATA_FLAG_NONE = 0x00000000
 STATUS_SUCCESS = 0
 STATUS_UNSUCCESSFUL = -1073741823  # 0xC0000001
+
+# HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_REQUEST_CANCELED) — 앱이 하이드레이션을 취소함
+# (썸네일 추출 종료·파일 닫힘 등). 오류가 아니라 정상 흐름이므로 조용히 중단해야 한다.
+E_CLOUD_FILE_REQUEST_CANCELED = 0x8007018E
+
+
+def is_canceled(hr: int) -> bool:
+    return (hr & 0xFFFFFFFF) == E_CLOUD_FILE_REQUEST_CANCELED
 
 
 class CF_OPERATION_INFO(ctypes.Structure):
@@ -345,6 +365,56 @@ CfCreatePlaceholders.argtypes = [LPCWSTR, POINTER(CF_PLACEHOLDER_CREATE_INFO),
 CfExecute = cldapi.CfExecute
 CfExecute.restype = HRESULT
 CfExecute.argtypes = [POINTER(CF_OPERATION_INFO), LPCVOID]  # params: byref overlay
+
+# ---------------------------------------------------------------------------
+# 로컬→원격 업로드용: 실제 파일을 in-sync 플레이스홀더로 변환("동기화 보류중" 해소)
+# ---------------------------------------------------------------------------
+CF_CONVERT_FLAG_NONE = 0x00000000
+CF_CONVERT_FLAG_MARK_IN_SYNC = 0x00000001
+CF_CONVERT_FLAG_DEHYDRATE = 0x00000002
+
+# HRESULT CfConvertToPlaceholder(HANDLE, LPCVOID FileIdentity, DWORD, CF_CONVERT_FLAGS,
+#                                USN* ConvertUsn(opt), LPOVERLAPPED(opt))
+CfConvertToPlaceholder = cldapi.CfConvertToPlaceholder
+CfConvertToPlaceholder.restype = HRESULT
+CfConvertToPlaceholder.argtypes = [wintypes.HANDLE, LPCVOID, DWORD, DWORD,
+                                   POINTER(LARGE_INTEGER), LPVOID]
+
+# HRESULT CfDehydratePlaceholder(HANDLE, LARGE_INTEGER StartOffset, LARGE_INTEGER Length,
+#                                CF_DEHYDRATE_FLAGS, LPOVERLAPPED)  — Length=-1: 파일 전체
+CF_DEHYDRATE_FLAG_NONE = 0x00000000
+CfDehydratePlaceholder = cldapi.CfDehydratePlaceholder
+CfDehydratePlaceholder.restype = HRESULT
+CfDehydratePlaceholder.argtypes = [wintypes.HANDLE, LARGE_INTEGER, LARGE_INTEGER,
+                                   DWORD, LPVOID]
+
+# 파일 속성+reparse 태그로 플레이스홀더 상태를 판정(핸들 불필요). 업로드 스캔에서
+# '우리 파일(in-sync)'과 '아직 서버에 없는(신규/보류) 파일'을 구분하는 데 쓴다.
+CF_PLACEHOLDER_STATE_NO_STATES = 0x00000000
+CF_PLACEHOLDER_STATE_PLACEHOLDER = 0x00000001
+CF_PLACEHOLDER_STATE_IN_SYNC = 0x00000008
+CF_PLACEHOLDER_STATE_INVALID = 0xFFFFFFFF
+CfGetPlaceholderStateFromAttributeTag = cldapi.CfGetPlaceholderStateFromAttributeTag
+CfGetPlaceholderStateFromAttributeTag.restype = DWORD    # CF_PLACEHOLDER_STATE
+CfGetPlaceholderStateFromAttributeTag.argtypes = [DWORD, DWORD]
+
+# kernel32: 파일 핸들 열기/닫기 (CfConvertToPlaceholder 는 쓰기 가능한 핸들이 필요)
+kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
+CreateFileW = kernel32.CreateFileW
+CreateFileW.restype = wintypes.HANDLE
+CreateFileW.argtypes = [LPCWSTR, DWORD, DWORD, LPVOID, DWORD, DWORD, wintypes.HANDLE]
+CloseHandle = kernel32.CloseHandle
+CloseHandle.restype = wintypes.BOOL
+CloseHandle.argtypes = [wintypes.HANDLE]
+
+GENERIC_READ = 0x80000000
+GENERIC_WRITE = 0x40000000
+FILE_SHARE_READ = 0x00000001
+FILE_SHARE_WRITE = 0x00000002
+FILE_SHARE_DELETE = 0x00000004
+OPEN_EXISTING = 3
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 # CHAR RtlSetProcessPlaceholderCompatibilityMode(CHAR Mode)
 RtlSetProcessPlaceholderCompatibilityMode = ntdll.RtlSetProcessPlaceholderCompatibilityMode

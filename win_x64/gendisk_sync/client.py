@@ -3,7 +3,11 @@
 로그인은 세션 쿠키를 발급하는데, 그 쿠키 값이 곧 세션 토큰이다. 값을 추출해
 이후 요청에 Authorization: Bearer 로 실어 보낸다 (서버가 쿠키/Bearer 둘 다 허용).
 """
+import gzip
+import http.client
 import json
+import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -126,15 +130,48 @@ class GenDiskClient:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        u = urllib.parse.urlsplit(self.base_url)
+        self._scheme = (u.scheme or "https").lower()
+        self._host = u.hostname or ""
+        self._port = u.port
+        self._prefix = (u.path or "").rstrip("/")   # base_url 에 경로 접두어가 있으면 유지
+        # keep-alive 연결을 스레드별로 보관해 재사용한다. CfAPI 콜백은 여러 스레드에서 동시에
+        # 오므로, 스레드마다 자기 연결을 써 서로 막지 않게 한다(단일 공유 연결의 직렬화 회피).
+        self._local = threading.local()
 
-    # ---------- 저수준 요청 ----------
+    # ---------- 저수준 요청 (스레드별 keep-alive 연결 재사용) ----------
+    def _new_conn(self):
+        if self._scheme == "https":
+            return http.client.HTTPSConnection(
+                self._host, self._port or 443, timeout=self.timeout,
+                context=ssl.create_default_context())
+        return http.client.HTTPConnection(self._host, self._port or 80, timeout=self.timeout)
+
+    def _drop_conn(self):
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
+
+    def close(self):
+        """이 스레드의 keep-alive 연결을 닫는다(best-effort)."""
+        self._drop_conn()
+
     def _request(self, method: str, path: str, *, params=None, json_body=None,
                  data: bytes | None = None, content_type: str | None = None,
-                 extra_headers: dict | None = None):
-        url = self.base_url + path
+                 extra_headers: dict | None = None, gzip_ok: bool = True):
+        """요청 후 (status, headers(소문자키 dict), body(bytes)) 반환. 4xx/5xx 는 기존처럼
+        ApiError/AuthError 로 올린다. 스레드별 keep-alive 연결을 재사용하고, 끊긴 소켓이면
+        새 연결로 1회 재시도한다. gzip_ok=False 면 파일 다운로드/Range 처럼 압축을 피한다."""
+        full = self._prefix + path
         if params:
-            url += "?" + urllib.parse.urlencode(params)
+            full += "?" + urllib.parse.urlencode(params)
         headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
+        if gzip_ok:
+            headers["Accept-Encoding"] = "gzip"
         if self.token:
             headers["Authorization"] = "Bearer " + self.token
         if extra_headers:
@@ -145,28 +182,49 @@ class GenDiskClient:
             headers["Content-Type"] = "application/json"
         elif content_type:
             headers["Content-Type"] = content_type
-        req = urllib.request.Request(url, data=body, headers=headers, method=method)
-        try:
-            resp = urllib.request.urlopen(req, timeout=self.timeout)
-            return resp
-        except urllib.error.HTTPError as e:
-            raw = e.read().decode("utf-8", "replace")
-            cf = _blocked_by_cloudflare(e.code, raw)
-            if cf:
-                raise ApiError(e.code, cf)
-            detail = raw
+
+        status = raw = hdrs = None
+        for attempt in (1, 2):
+            conn = getattr(self._local, "conn", None)
+            if conn is None:
+                conn = self._new_conn()
+                self._local.conn = conn
             try:
-                detail = json.loads(raw).get("detail", raw)
+                conn.request(method, full, body=body, headers=headers)
+                resp = conn.getresponse()
+                raw = resp.read()                # 연결 재사용 위해 본문을 전부 소비
+                status = resp.status
+                hdrs = {k.lower(): v for k, v in resp.getheaders()}
+                break
+            except (http.client.HTTPException, OSError):
+                self._drop_conn()                # 만료/리셋된 keep-alive 소켓 → 새 연결로 재시도
+                if attempt == 2:
+                    raise
+
+        if raw and hdrs.get("content-encoding", "").lower() == "gzip":
+            try:
+                raw = gzip.decompress(raw)
+            except OSError:
+                pass
+        if status >= 400:
+            text = raw.decode("utf-8", "replace")
+            cf = _blocked_by_cloudflare(status, text)
+            if cf:
+                raise ApiError(status, cf)
+            detail = text
+            try:
+                detail = json.loads(text).get("detail", text)
             except Exception:
                 pass
-            if e.code == 401:
+            if status == 401:
                 raise AuthError(detail)
-            raise ApiError(e.code, detail)
+            raise ApiError(status, detail)
+        return status, hdrs, raw
 
     def _json(self, method, path, **kw):
-        resp = self._request(method, path, **kw)
-        raw = resp.read().decode("utf-8")
-        return json.loads(raw) if raw else {}
+        _status, _hdrs, raw = self._request(method, path, **kw)
+        text = raw.decode("utf-8")
+        return json.loads(text) if text else {}
 
     # ---------- 인증 ----------
     def login(self, username: str, password: str) -> str:
@@ -220,20 +278,19 @@ class GenDiskClient:
                           params={"space": space, "path": path})
 
     def download(self, space: str, path: str) -> bytes:
-        resp = self._request("GET", "/api/files/download",
-                            params={"space": space, "path": path})
-        return resp.read()
+        _s, _h, raw = self._request("GET", "/api/files/download",
+                                    params={"space": space, "path": path}, gzip_ok=False)
+        return raw
 
     def download_range(self, space: str, path: str, offset: int, length: int) -> bytes:
         """[offset, offset+length) 바이트만 받는다 (온디맨드 하이드레이션용).
         서버는 Range 를 지원해 206 을 준다. 서버가 Range 를 무시하고 200 을 주면
-        받은 전체에서 필요한 구간을 잘라 반환한다(안전장치)."""
+        받은 전체에서 필요한 구간을 잘라 반환한다(안전장치). gzip_ok=False: 파일 바이트는 압축 안 함."""
         end = offset + length - 1
-        resp = self._request("GET", "/api/files/download",
-                            params={"space": space, "path": path},
-                            extra_headers={"Range": f"bytes={offset}-{end}"})
-        data = resp.read()
-        status = getattr(resp, "status", None) or resp.getcode()
+        status, _h, data = self._request(
+            "GET", "/api/files/download",
+            params={"space": space, "path": path},
+            extra_headers={"Range": f"bytes={offset}-{end}"}, gzip_ok=False)
         if status == 200 and (offset or length < len(data)):
             data = data[offset:offset + length]
         return data
@@ -244,15 +301,18 @@ class GenDiskClient:
                          data=data, content_type="application/octet-stream")
 
     # ---------- 청크(분할) 업로드 ----------
-    def put_smart(self, space: str, path: str, local_path) -> None:
+    def put_smart(self, space: str, path: str, local_path, progress=None) -> None:
         """크기에 따라 업로드 방식을 고른다: 큰 파일은 조각으로 나눠(디스크에서 스트리밍)
         올려 앞단 제한·타임아웃을 우회하고 메모리도 아낀다. 작은 파일은 기존 한 방 업로드.
-        같은 경로를 원자적으로 덮어써(overwrite) 동기화 재시도 멱등성을 지킨다."""
+        같은 경로를 원자적으로 덮어써(overwrite) 동기화 재시도 멱등성을 지킨다.
+        progress(done_bytes, total_bytes) 가 있으면 조각마다 호출해 진행률을 보고한다."""
         from pathlib import Path
         p = Path(local_path)
         size = p.stat().st_size
         if size <= CHUNK_THRESHOLD:
             self.put(space, path, p.read_bytes())
+            if progress:
+                progress(size, size)
             return
         upload_id = self._upload_init(space, path, size)
         with p.open("rb") as f:
@@ -263,6 +323,8 @@ class GenDiskClient:
                     break
                 self._upload_chunk(upload_id, offset, chunk)
                 offset += len(chunk)
+                if progress:
+                    progress(offset, size)
         self._upload_complete(upload_id)
 
     def _upload_init(self, space: str, path: str, size: int) -> str:
@@ -325,3 +387,8 @@ class GenDiskClient:
         except ApiError as e:
             if e.status != 404:  # 이미 없으면 무시
                 raise
+
+    def move(self, space: str, src: str, dst: str) -> dict:
+        """같은 저장소 안에서 이동/이름변경 (src -> dst). 폴더 간 이동도 포함."""
+        return self._json("POST", "/api/files/move",
+                          json_body={"src": src, "dst": dst, "space": space})

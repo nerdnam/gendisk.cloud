@@ -16,7 +16,7 @@ from . import autostart, secret, single_instance
 from .client import (
     ApiError, AuthError, GenDiskClient, webdav_preflight, webdav_preflight_url)
 from .config import Config
-from .drive import DriveController
+from .drive import DriveController, TransferTracker
 from .engine import SyncEngine
 from .icon import icon_path, render_icon
 from .webdav_manager import WebDavPanel
@@ -97,13 +97,17 @@ class App:
         self.root.geometry("1120x772")   # 2열 배치 — 스크롤 없이 콘텐츠가 맞는 높이
         self.root.minsize(980, 700)
         self._apply_window_icon()
+        self.transfers = TransferTracker()      # 진행 중 전송(업로드) 추적 → 상태 패널
         self._build_ui()
         self.worker = SyncWorker(self)
         self.worker.start()
-        self.drive = DriveController(self.cfg, on_reauth=self._drive_reauth, log=self.log)
+        self.drive = DriveController(self.cfg, on_reauth=self._drive_reauth,
+                                     log=self.log, notify=self._drive_notify,
+                                     progress=self._on_transfer)
         self.tray = None
         self._tray_notified = False
         self._build_tray()
+        self._refresh_transfers()               # 전송 현황 주기 갱신 시작
         # 두 번째 실행이 신호를 보내면 이 창을 전면화한다(단일 인스턴스).
         try:
             single_instance.start_show_listener(self._bring_to_front)
@@ -530,6 +534,12 @@ class App:
         self.lbl_status = ctk.CTkLabel(c, text="대기 중", font=self.font_s,
                                        text_color=MUTED, anchor="w")
         self.lbl_status.pack(fill="x", pady=(0, 6))
+        # 전송 현황 (FTP식 파일별 진행률·속도)
+        ctk.CTkLabel(c, text="전송 현황", font=self.font_s, text_color=MUTED,
+                     anchor="w").pack(fill="x")
+        self.txt_transfers = ctk.CTkTextbox(c, height=76, wrap="none", font=self.font_mono)
+        self.txt_transfers.pack(fill="x", pady=(2, 8))
+        self.txt_transfers.configure(state="disabled")
         self.txt_log = ctk.CTkTextbox(c, height=150, wrap="word", font=self.font_mono)
         self.txt_log.pack(fill="both", expand=True)
         self.txt_log.configure(state="disabled")
@@ -700,6 +710,65 @@ class App:
             self.log(f"재로그인 실패: {e}")
 
     # ---------- genDISK Drive (온디맨드) ----------
+    @staticmethod
+    def _fmt_size(n):
+        n = float(max(0, int(n or 0)))
+        u = ["B", "KB", "MB", "GB", "TB"]
+        i = 0
+        while n >= 1024 and i < 4:
+            n /= 1024
+            i += 1
+        return f"{n:.1f} {u[i]}"
+
+    def _fmt_rate(self, bps):
+        return self._fmt_size(bps) + "/s"
+
+    def _on_transfer(self, key, name, direction, done, total):
+        """DriveController 전송 진행 콜백 → 트래커 갱신. done=None 이면 종료."""
+        if done is None:
+            self.transfers.finish(key)
+        else:
+            self.transfers.update(key, name, direction, done, total)
+
+    def _refresh_transfers(self):
+        """전송 현황 패널을 주기적으로 다시 그린다(FTP식 파일별 진행률·속도)."""
+        try:
+            items = self.transfers.snapshot()
+            if items:
+                lines = []
+                for it in items:
+                    total = it["total"]
+                    pct = int(it["done"] * 100 / total) if total else 0
+                    arrow = "⬆" if it["dir"] == "up" else "⬇"
+                    lines.append(
+                        f"{arrow} {it['name'][:26]:<26} {pct:3d}%  "
+                        f"{self._fmt_rate(it['rate']):>11}  "
+                        f"({self._fmt_size(it['done'])}/{self._fmt_size(total)})")
+                text = "\n".join(lines)
+            else:
+                text = "(전송 없음)"
+            self.txt_transfers.configure(state="normal")
+            self.txt_transfers.delete("1.0", "end")
+            self.txt_transfers.insert("1.0", text)
+            self.txt_transfers.configure(state="disabled")
+        except Exception:
+            pass
+        try:
+            self.root.after(700, self._refresh_transfers)
+        except Exception:
+            pass
+
+    def _drive_notify(self, msg: str):
+        """드라이브 업로드 등 진행 상황을 트레이 토스트로 알린다(트레이 없으면 로그만).
+        업로드는 Windows 가 자체 진행창을 안 띄워서(다운로드/하이드레이션만 띄움) 이걸로 표시."""
+        try:
+            if self.tray is not None:
+                self.tray.notify(str(msg), "genDISK Drive")
+            else:
+                self.log(str(msg))
+        except Exception:
+            pass
+
     def _drive_reauth(self) -> bool:
         """드라이브 콜백에서 세션 만료 시 저장된 정보로 재로그인 (성공 시 cfg.token 갱신)."""
         pw = self.cfg.get_password() or self._pw

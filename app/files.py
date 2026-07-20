@@ -143,9 +143,15 @@ def etag_of(stat: os.stat_result) -> str:
     return f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
 
 
-def entry_info(path: Path, root: Path) -> dict:
-    stat = path.stat()
-    is_dir = path.is_dir()
+def entry_info(path: Path, root: Path, de: "os.DirEntry | None" = None) -> dict:
+    # de(os.scandir 의 DirEntry)가 있으면 열거 때 이미 캐시된 stat/is_dir 을 재사용해
+    # 파일당 stat syscall 2번을 아낀다(폴더 목록 응답 지연의 큰 부분). 없으면 직접 stat.
+    if de is not None:
+        stat = de.stat()
+        is_dir = de.is_dir()
+    else:
+        stat = path.stat()
+        is_dir = path.is_dir()
     return {
         "name": path.name,
         "path": path.relative_to(root).as_posix(),
@@ -198,7 +204,7 @@ def list_dir(path: str = "", space: str = HOME_SPACE, user: dict = Depends(curre
     entries = []
     for de in dirents:
         try:
-            entries.append(entry_info(Path(de.path), root))
+            entries.append(entry_info(Path(de.path), root, de=de))
         except OSError:
             # stat 이 막혀도(권한, 깨진 링크, 마운트 문제 등) 이름은 보여준다.
             # 통째로 숨기면 클라이언트에서 "폴더가 비어 보이는" 원인 불명 증상이 된다.
