@@ -94,8 +94,8 @@ class App:
         self._pw = self.cfg.get_password()
         self.root = ctk.CTk()
         self.root.title("genDISK")
-        self.root.geometry("1120x772")   # 2열 배치 — 스크롤 없이 콘텐츠가 맞는 높이
-        self.root.minsize(980, 700)
+        self.root.geometry("1120x860")   # 2열 배치 — 전송 현황 패널까지 스크롤 없이 맞는 높이
+        self.root.minsize(980, 760)
         self._apply_window_icon()
         self.transfers = TransferTracker()      # 진행 중 전송(업로드) 추적 → 상태 패널
         self._build_ui()

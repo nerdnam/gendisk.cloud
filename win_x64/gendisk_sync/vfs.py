@@ -325,11 +325,16 @@ class Provider:
                 name = de.name
                 if name.lower() == "desktop.ini" or name.startswith("."):
                     continue
-                # 우리 파일(in-sync 플레이스홀더 — 다운로드했거나 이미 올린 것)은 건너뛰고,
-                # 아직 서버에 없는(신규/보류) 파일만 올린다. reparse 유무가 아니라 in-sync 로 판별해
-                # Windows 가 드롭 파일을 곧바로 placeholder 로 만들어도 놓치지 않는다.
+                attrs = getattr(st, "st_file_attributes", 0)
+                # 오프라인(디하이드레이트)= 로컬 데이터 없음 → 드롭한 파일이 아니다(우리 placeholder).
+                # 올리려고 읽으면 하이드레이션이 돌아 실패(무한 업로드 루프)하므로 반드시 건너뛴다.
+                if attrs & C.FILE_ATTRIBUTE_OFFLINE:
+                    continue
+                # 우리 파일(in-sync 플레이스홀더)은 건너뛰고, 아직 서버에 없는(신규/보류)만 올린다.
+                # reparse 유무가 아니라 in-sync 로 판별 → Windows 가 드롭을 곧바로 placeholder 로
+                # 만들어도 놓치지 않는다.
                 state = C.CfGetPlaceholderStateFromAttributeTag(
-                    getattr(st, "st_file_attributes", 0), getattr(st, "st_reparse_tag", 0))
+                    attrs, getattr(st, "st_reparse_tag", 0))
                 if state != C.CF_PLACEHOLDER_STATE_INVALID and (
                         state & C.CF_PLACEHOLDER_STATE_IN_SYNC):
                     continue
@@ -422,6 +427,9 @@ class Provider:
     def _on_fetch_data(self, info_p, params_p):
         req_off = req_len = 0
         info = None
+        rel = None
+        local_path = None
+        meta = {}
         try:
             info = info_p[0]
             fdp = ctypes.cast(params_p, POINTER(C.FETCH_DATA_PARAMS))[0]
@@ -441,6 +449,21 @@ class Provider:
             self._hydrate(info.ConnectionKey, info.TransferKey,
                           meta, file_size, req_off, req_len, local_path)
         except Exception as e:  # noqa: BLE001
+            # identity 가 옛 경로(rename 전)라 404 나면, 현재 로컬 이름으로 매핑해 재시도하고
+            # identity 를 자가복구한다. (이미 깨진 placeholder 도 열면 스스로 고쳐짐)
+            if getattr(e, "status", None) == 404 and info is not None and rel:
+                tgt = self._upload_target(rel)
+                if tgt and tgt[1] and (tgt[0], tgt[1]) != (meta.get("space"), meta.get("path")):
+                    meta2 = {"space": tgt[0], "path": tgt[1], "dir": False}
+                    self.log(f"[vfs] FETCH_DATA 404 → retry as {tgt[0]}:{tgt[1]} (self-heal)")
+                    try:
+                        self._hydrate(info.ConnectionKey, info.TransferKey,
+                                      meta2, file_size, req_off, req_len, local_path)
+                        if local_path:
+                            self._update_identity(local_path, meta2)
+                        return
+                    except Exception as e2:  # noqa: BLE001
+                        self.log(f"[vfs] self-heal failed: {e2!r}")
             self.log(f"[vfs] FETCH_DATA error: {e!r}")
             if info is not None:
                 try:
@@ -573,6 +596,12 @@ class Provider:
                 return
             self.rename(o[0], o[1], n[1])
             self.log(f"[vfs] renamed on server: {o[0]}: {o[1]} -> {n[1]}")
+            # 로컬 placeholder 의 FileIdentity 를 새 경로로 갱신 + in-sync 표시.
+            # (안 하면 열 때 옛 경로로 FETCH_DATA → 404, upload_scan 이 오해해 계속 업로드.)
+            new_local = self.root if new_rel == "" else os.path.join(
+                self.root, new_rel.replace("/", os.sep))
+            self._update_identity(
+                new_local, {"space": n[0], "path": n[1], "dir": os.path.isdir(new_local)})
         except Exception as e:  # noqa: BLE001
             self.log(f"[vfs] rename propagate error: {e!r}")
 
@@ -596,6 +625,26 @@ class Provider:
                 self.log(f"[vfs] dehydrate {C.hr_str(hr)}: {local_path}")
         except Exception as e:  # noqa: BLE001
             self.log(f"[vfs] dehydrate error: {e!r}")
+        finally:
+            C.CloseHandle(h)
+
+    def _update_identity(self, local_path: str, identity: dict):
+        """placeholder 의 FileIdentity(서버 경로)를 갱신하고 in-sync 로 표시한다.
+        이름변경 후 옛 경로가 남아 FETCH_DATA 가 404 나던 것을 고친다. best-effort."""
+        ident = json.dumps(identity).encode("utf-8")
+        idbuf = ctypes.create_string_buffer(ident, len(ident))
+        h = C.CreateFileW(local_path, C.GENERIC_READ | C.GENERIC_WRITE,
+                          C.FILE_SHARE_READ | C.FILE_SHARE_WRITE | C.FILE_SHARE_DELETE,
+                          None, C.OPEN_EXISTING, C.FILE_FLAG_BACKUP_SEMANTICS, None)
+        if not h or h == C.INVALID_HANDLE_VALUE:
+            return
+        try:
+            hr = C.CfUpdatePlaceholder(h, None, ctypes.cast(idbuf, C.LPCVOID), len(ident),
+                                       None, 0, C.CF_UPDATE_FLAG_MARK_IN_SYNC, None, None)
+            if not C.hr_ok(hr):
+                self.log(f"[vfs] CfUpdatePlaceholder {C.hr_str(hr)}: {local_path}")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[vfs] update identity error: {e!r}")
         finally:
             C.CloseHandle(h)
 

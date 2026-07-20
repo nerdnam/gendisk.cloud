@@ -398,6 +398,18 @@ CfGetPlaceholderStateFromAttributeTag = cldapi.CfGetPlaceholderStateFromAttribut
 CfGetPlaceholderStateFromAttributeTag.restype = DWORD    # CF_PLACEHOLDER_STATE
 CfGetPlaceholderStateFromAttributeTag.argtypes = [DWORD, DWORD]
 
+FILE_ATTRIBUTE_OFFLINE = 0x00001000        # 디하이드레이트(로컬 데이터 없음) — 드롭 파일 아님
+
+# HRESULT CfUpdatePlaceholder(HANDLE, CF_FS_METADATA*(opt), LPCVOID FileIdentity, DWORD,
+#   CF_FILE_RANGE*(opt), DWORD, CF_UPDATE_FLAGS, USN*(opt), LPOVERLAPPED(opt))
+# 이름변경 후 FileIdentity(서버 경로)를 새 경로로 갱신 + MARK_IN_SYNC 하는 데 쓴다.
+CF_UPDATE_FLAG_NONE = 0x00000000
+CF_UPDATE_FLAG_MARK_IN_SYNC = 0x00000001
+CfUpdatePlaceholder = cldapi.CfUpdatePlaceholder
+CfUpdatePlaceholder.restype = HRESULT
+CfUpdatePlaceholder.argtypes = [wintypes.HANDLE, LPCVOID, LPCVOID, DWORD,
+                                LPCVOID, DWORD, DWORD, POINTER(LARGE_INTEGER), LPVOID]
+
 # kernel32: 파일 핸들 열기/닫기 (CfConvertToPlaceholder 는 쓰기 가능한 핸들이 필요)
 kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
 CreateFileW = kernel32.CreateFileW
