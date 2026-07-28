@@ -1048,15 +1048,30 @@ document.addEventListener("drop", (e) => {
 
 /* ---------- 미리보기 ---------- */
 let previewPushed = false; // 미리보기 열 때 히스토리 항목을 추가했는지
+let previewIndex = -1;     // 현재 폴더의 미리보기 가능 목록에서의 위치 (이전/다음 이동용)
+
+// 현재 폴더에서 미리보기로 볼 수 있는 항목들(정렬된 화면 순서 그대로)
+function previewList() {
+  return currentEntries.filter(
+    (e) => !e.is_dir && ["image", "video", "audio"].includes(e.kind));
+}
 
 function openPreview(entry) {
-  const modal = $("preview-modal");
-  const content = $("preview-content");
-  content.innerHTML = "";
-  $("preview-name").textContent = entry.name;
-  $("preview-download").href = fileUrl("download", entry.path);
   history.pushState({ ncPreview: true }, "", location.hash || buildHash());
   previewPushed = true;
+  showPreviewEntry(entry);
+  $("preview-modal").classList.remove("hidden");
+}
+
+// 모달을 유지한 채 내용만 교체한다(이전/다음 이동 — 히스토리 추가 없음).
+function showPreviewEntry(entry) {
+  const content = $("preview-content");
+  content.innerHTML = "";
+  const list = previewList();
+  previewIndex = list.findIndex((e) => e.path === entry.path);
+  const counter = list.length > 1 ? `  (${previewIndex + 1}/${list.length})` : "";
+  $("preview-name").textContent = entry.name + counter;
+  $("preview-download").href = fileUrl("download", entry.path);
 
   const rawUrl = fileUrl("raw", entry.path);
   let el;
@@ -1074,8 +1089,44 @@ function openPreview(entry) {
     el.controls = true;
     el.autoplay = true;
   }
-  content.appendChild(el);
-  modal.classList.remove("hidden");
+
+  // 사진/영상 위에 딱 붙는 컨트롤(스마트폰·큰 화면에서 손이 닿게): 닫기 + 이전/다음.
+  const stage = document.createElement("div");
+  stage.className = "preview-stage";
+  stage.appendChild(el);
+  if (entry.kind !== "audio") {
+    const x = document.createElement("button");
+    x.className = "preview-stage-close";
+    x.title = "닫기 (Esc)";
+    x.textContent = "✕";
+    x.onclick = closePreview;
+    stage.appendChild(x);
+  }
+  if (list.length > 1) {
+    const prev = document.createElement("button");
+    prev.className = "preview-nav prev";
+    prev.title = "이전 (←)";
+    prev.textContent = "‹";
+    prev.disabled = previewIndex <= 0;
+    prev.onclick = (e) => { e.stopPropagation(); previewStep(-1); };
+    const next = document.createElement("button");
+    next.className = "preview-nav next";
+    next.title = "다음 (→)";
+    next.textContent = "›";
+    next.disabled = previewIndex >= list.length - 1;
+    next.onclick = (e) => { e.stopPropagation(); previewStep(1); };
+    stage.appendChild(prev);
+    stage.appendChild(next);
+  }
+  content.appendChild(stage);
+}
+
+function previewStep(delta) {
+  const list = previewList();
+  if (previewIndex < 0 || !list.length) return;
+  const i = previewIndex + delta;
+  if (i < 0 || i >= list.length) return;
+  showPreviewEntry(list[i]);
 }
 
 function destroyPreview() {
@@ -1094,6 +1145,33 @@ function closePreview() {
 
 $("preview-close").addEventListener("click", closePreview);
 document.querySelector(".preview-backdrop").addEventListener("click", closePreview);
+
+// 미리보기에서 ←/→ 키로 이전/다음 이동
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  if ($("preview-modal").classList.contains("hidden")) return;
+  const tag = (document.activeElement || {}).tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA") return;
+  previewStep(e.key === "ArrowLeft" ? -1 : 1);
+});
+
+// 사진 위에서 좌우로 쓸어넘기면 이전/다음 (스마트폰)
+(() => {
+  let sx = 0, sy = 0;
+  const pc = $("preview-content");
+  pc.addEventListener("touchstart", (e) => {
+    sx = e.touches[0].clientX;
+    sy = e.touches[0].clientY;
+  }, { passive: true });
+  pc.addEventListener("touchend", (e) => {
+    const dx = e.changedTouches[0].clientX - sx;
+    const dy = e.changedTouches[0].clientY - sy;
+    if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      previewStep(dx > 0 ? -1 : 1);   // 오른쪽으로 쓸기 = 이전
+    }
+  }, { passive: true });
+})();
+
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!$("preview-modal").classList.contains("hidden")) {

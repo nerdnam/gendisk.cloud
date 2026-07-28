@@ -594,12 +594,44 @@ body.dragging #drop-hint { display: block; }
   display: flex; align-items: center; justify-content: center;
   min-height: 0;
 }
+/* 미디어를 감싸는 무대 — 닫기/이전/다음 버튼이 사진 가장자리에 딱 붙는 기준점 */
+.preview-stage {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  max-width: 100%; max-height: 100%;
+}
 #preview-content img, #preview-content video {
+  display: block;
   max-width: 100%;
-  max-height: 100%;
+  max-height: calc(100vh - 130px);   /* 상단 바·여백 제외한 화면 높이 */
+  max-height: calc(100dvh - 130px);  /* 모바일 주소창 변동 대응 */
   border-radius: 8px;
 }
 #preview-content audio { width: min(480px, 90%); }
+/* 사진 우측 상단 닫기 — 화면 구석까지 안 가도 닫힌다 (스마트폰 친화) */
+.preview-stage-close {
+  position: absolute; top: 10px; right: 10px; z-index: 2;
+  width: 40px; height: 40px;
+  border: 0; border-radius: 50%;
+  background: rgba(15, 20, 30, .62);
+  color: #fff; font-size: 17px; line-height: 1;
+  cursor: pointer;
+}
+.preview-stage-close:hover { background: rgba(15, 20, 30, .85); }
+/* 사진 위 이전/다음 화살표 */
+.preview-nav {
+  position: absolute; top: 50%; transform: translateY(-50%); z-index: 2;
+  width: 44px; height: 72px;
+  border: 0; border-radius: 10px;
+  background: rgba(15, 20, 30, .5);
+  color: #fff; font-size: 32px; line-height: 1;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.preview-nav:hover { background: rgba(15, 20, 30, .8); }
+.preview-nav:disabled { opacity: .25; cursor: default; }
+.preview-nav.prev { left: 10px; }
+.preview-nav.next { right: 10px; }
 
 /* ========== 외부 공유 ========== */
 
