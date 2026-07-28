@@ -535,8 +535,8 @@ class App:
                       variable=self.var_drive_sync,
                       command=self._toggle_drive_sync).pack(anchor="w", pady=(8, 0))
         self._field_label(
-            c, "끄면 SMB처럼 폴더를 열 때만 서버 목록을 가져옵니다.\n"
-               "켜면 폰/웹에서 바꾼 내용이 열어 둔 폴더에도 실시간 반영됩니다.").pack(
+            c, "끄면 SMB처럼 폴더를 열 때마다 서버에서 최신 목록을 가져옵니다(항상 정확).\n"
+               "켜면 백그라운드로 실시간 반영되고 폴더 열기는 로컬이라 훨씬 빠릅니다.").pack(
             fill="x", pady=(2, 0))
         vrow = ctk.CTkFrame(c, fg_color="transparent")
         vrow.pack(fill="x", pady=(8, 0))

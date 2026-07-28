@@ -404,7 +404,12 @@ FILE_ATTRIBUTE_OFFLINE = 0x00001000        # 디하이드레이트(로컬 데이
 #   CF_FILE_RANGE*(opt), DWORD, CF_UPDATE_FLAGS, USN*(opt), LPOVERLAPPED(opt))
 # 이름변경 후 FileIdentity(서버 경로)를 새 경로로 갱신 + MARK_IN_SYNC 하는 데 쓴다.
 CF_UPDATE_FLAG_NONE = 0x00000000
-CF_UPDATE_FLAG_MARK_IN_SYNC = 0x00000001
+# 주의: cfapi.h 에서 0x1 은 VERIFY_IN_SYNC 다. MARK_IN_SYNC 는 0x2 (과거 0x1 로 잘못 정의돼
+# 이름변경 후 in-sync 표시가 안 먹던 버그 수정).
+CF_UPDATE_FLAG_VERIFY_IN_SYNC = 0x00000001
+CF_UPDATE_FLAG_MARK_IN_SYNC = 0x00000002
+# 폴더의 '채움 완료' 고정을 풀어 다음 열람 때 FETCH_PLACEHOLDERS 가 다시 오게 한다(SMB식 전환용).
+CF_UPDATE_FLAG_ENABLE_ON_DEMAND_POPULATION = 0x00000020
 CfUpdatePlaceholder = cldapi.CfUpdatePlaceholder
 CfUpdatePlaceholder.restype = HRESULT
 CfUpdatePlaceholder.argtypes = [wintypes.HANDLE, LPCVOID, LPCVOID, DWORD,

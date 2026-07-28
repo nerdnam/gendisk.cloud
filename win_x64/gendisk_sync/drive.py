@@ -111,6 +111,7 @@ class DriveController:
         self._events_thread = None
         self._events_stream = None      # 열려 있는 EventStream (종료 시 close 로 읽기 깨우기)
         self._cached_client = None      # keep-alive 연결을 살리려 클라이언트를 재사용
+        self._cached_fast_client = None  # 목록 조회 전용(짧은 타임아웃) 클라이언트
         self._delta_lock = threading.Lock()  # 폴링·수동 새로고침의 delta 패스 직렬화
         self._delta_cursors = self._load_cursors()   # space id -> delta 커서(서버 시각 ns)
         self._delta_supported = None    # None=미확인(첫 패스에서 /info features 로 판별)
@@ -133,7 +134,7 @@ class DriveController:
         return _log
 
     def _list_spaces(self):
-        return self._with_reauth(lambda c: c.spaces())
+        return self._with_reauth(lambda c: c.spaces(), fast=True)
 
     # --- 서버 호출 (세션 만료 시 1회 재로그인 후 재시도) ---
     def _client(self):
@@ -148,16 +149,29 @@ class DriveController:
             c.token = self.cfg.token
         return c
 
-    def _with_reauth(self, fn):
+    def _client_fast(self):
+        # 폴더 목록 조회 전용 — 짧은 타임아웃(12초). 탐색기가 열람(FETCH_PLACEHOLDERS)을
+        # 기다리는 동안 서버가 무응답이면 60초(+재시도)씩 매달리지 않게 한다.
+        c = self._cached_fast_client
+        base = self.cfg.server_url.rstrip("/")
+        if c is None or c.base_url != base:
+            c = GenDiskClient(self.cfg.server_url, self.cfg.token, timeout=12)
+            self._cached_fast_client = c
+        else:
+            c.token = self.cfg.token
+        return c
+
+    def _with_reauth(self, fn, fast=False):
+        get = self._client_fast if fast else self._client
         try:
-            return fn(self._client())
+            return fn(get())
         except AuthError:
             if self.on_reauth and self.on_reauth():
-                return fn(self._client())
+                return fn(get())
             raise
 
     def _list_dir(self, space, rel):
-        return self._with_reauth(lambda c: c.list_dir(space, rel))
+        return self._with_reauth(lambda c: c.list_dir(space, rel), fast=True)
 
     def _fetch_range(self, meta, offset, length):
         return self._with_reauth(
@@ -454,6 +468,10 @@ class DriveController:
                                 rename=self._rename_file, mkdir=self._mkdir_dir,
                                 notify=self._notify, progress=self._progress,
                                 state_path=_state_path(),
+                                # 자동 반영 끔 = SMB식(열 때마다 서버 조회, 항상 최신).
+                                # 자동 반영 켬 = 빠른 로컬 탐색(폴더 고정) + 백그라운드가
+                                # SSE/delta/deep refresh 로 최신화 — 탐색기가 안 기다린다.
+                                always_fresh=not self._sync_enabled(),
                                 space=self.cfg.space, log=self.log)
             prov.register()
             prov.connect()                 # 내부에서 populate_root()

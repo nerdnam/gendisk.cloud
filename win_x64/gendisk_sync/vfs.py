@@ -11,6 +11,7 @@ import ctypes
 import json
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from ctypes import POINTER, byref
 
@@ -74,6 +75,9 @@ class Provider:
         self._ph_lock = threading.Lock()    # CfCreatePlaceholders 동시호출 직렬화
         self._reconcile_lock = threading.Lock()  # 폴더 대조(refresh/refresh_dir) 직렬화 — 폴링·SSE 경쟁 방지
         self._refresh_err = False           # 직전 _refresh_one 의 목록 조회 실패 여부(연속 실패 중단용)
+        # SMB식 열람 버스트 흡수: 탐색기는 폴더 하나를 열 때 여러 번 열거한다(정렬·새로고침·
+        # 썸네일 등). 짧은 TTL 캐시로 그 버스트를 서버 왕복 1회로 줄인다(신선도 손실 ~2.5초).
+        self._enum_cache = {}               # rel -> (만료 monotonic, entries)
         self._hydrate_pool = None           # 병렬 다운로드 워커 풀(지연 생성)
         self._upload_seen = {}              # frel -> (size, mtime_ns): 안정성 대기 추적
         self._upload_done = {}              # frel -> (size, mtime_ns): 이미 업로드한 버전(재업로드 방지)
@@ -189,6 +193,15 @@ class Provider:
                                   C.CF_REGISTER_FLAG_UPDATE)
         if not C.hr_ok(hr):
             raise OSError(f"CfRegisterSyncRoot 실패 {C.hr_str(hr)}")
+        # 콘텐츠 인덱싱 제외(FANCI) — Windows Search 인덱서가 드라이브 전체를 훑으며
+        # 폴더마다 서버 열거를 유발해 탐색기가 느려지는 것을 막는다(SMB 공유도 로컬 인덱싱 안 함).
+        try:
+            FANCI = 0x00002000  # FILE_ATTRIBUTE_NOT_CONTENT_INDEXED
+            attrs = ctypes.windll.kernel32.GetFileAttributesW(self.root)
+            if attrs != 0xFFFFFFFF and not (attrs & FANCI):
+                ctypes.windll.kernel32.SetFileAttributesW(self.root, attrs | FANCI)
+        except Exception:  # noqa: BLE001
+            pass
         self.log(f"[vfs] registered sync root: {self.root}")
 
     def unregister(self):
@@ -233,6 +246,41 @@ class Provider:
                 self.populate_root()
             except Exception as e:  # noqa: BLE001
                 self.log(f"[vfs] populate_root error: {e!r}")
+        # SMB식이면: 과거(동기화 모드/구버전) 세션에서 '채움 완료'로 고정된 폴더들을 풀어
+        # 다시 열 때마다 서버 조회가 일어나게 한다. 안 풀면 그 폴더들만 갱신이 안 돼
+        # "어떤 폴더는 최신, 어떤 폴더는 옛날" 이 된다.
+        if self.always_fresh:
+            self._unfreeze_populated()
+
+    def _enable_population(self, local_path: str) -> bool:
+        """폴더 placeholder 의 '채움 완료' 고정을 풀어 다음 열람 때 FETCH_PLACEHOLDERS 가
+        다시 오게 한다. best-effort — placeholder 가 아니면 조용히 실패."""
+        h = C.CreateFileW(local_path, C.GENERIC_READ | C.GENERIC_WRITE,
+                          C.FILE_SHARE_READ | C.FILE_SHARE_WRITE | C.FILE_SHARE_DELETE,
+                          None, C.OPEN_EXISTING, C.FILE_FLAG_BACKUP_SEMANTICS, None)
+        if not h or h == C.INVALID_HANDLE_VALUE:
+            return False
+        try:
+            hr = C.CfUpdatePlaceholder(h, None, None, 0, None, 0,
+                                       C.CF_UPDATE_FLAG_ENABLE_ON_DEMAND_POPULATION,
+                                       None, None)
+            return C.hr_ok(hr)
+        except Exception:  # noqa: BLE001
+            return False
+        finally:
+            C.CloseHandle(h)
+
+    def _unfreeze_populated(self):
+        """영속 populated 목록의 폴더들을 온디맨드로 되돌린다(SMB식 전환 시 1회)."""
+        n = 0
+        for rel in sorted(self._populated_dirs):
+            if rel == "":
+                continue                    # 루트는 실제 폴더(고정 개념 없음)
+            local = os.path.join(self.root, rel.replace("/", os.sep))
+            if os.path.isdir(local) and self._enable_population(local):
+                n += 1
+        if n:
+            self.log(f"[vfs] unfroze {n} dir(s) for always-fresh (SMB) listings")
 
     def _space_entries(self):
         """다중 저장소 모드: 접근 가능한 저장소들을 최상위 폴더 항목으로. 매핑도 갱신."""
@@ -937,14 +985,24 @@ class Provider:
             self._track_populated(rel)      # upload_scan·deep refresh 대상에 포함(+영속화)
             local = self.root if rel == "" else os.path.join(
                 self.root, rel.replace("/", os.sep))
-            entries = self._children_for(rel)
+            # 열람 버스트 캐시: 탐색기가 같은 폴더를 연달아 여러 번 열거하면(정렬·새로고침·
+            # 썸네일) 첫 번째만 서버에 묻고 나머지는 방금 받은 목록을 재사용한다.
+            now = time.monotonic()
+            cached = self._enum_cache.get(rel)
+            from_cache = cached is not None and cached[0] > now
+            if from_cache:
+                entries = cached[1]
+            else:
+                entries = self._children_for(rel)
+                self._enum_cache[rel] = (now + 2.5, entries)
             try:
                 existing = set(os.listdir(local))
             except OSError:
                 existing = set()
             fresh = [e for e in entries if e["name"] not in existing]
             self.log(f"[vfs] FETCH_PLACEHOLDERS dir='{rel}' -> "
-                     f"{len(entries)} entries (+{len(fresh)} new)")
+                     f"{len(entries)} entries (+{len(fresh)} new)"
+                     + (" [cache]" if from_cache else ""))
             arr, keep = self._build_placeholders(fresh)  # noqa: F841 (keep alive)
             op = C.CF_OPERATION_INFO()
             op.StructSize = ctypes.sizeof(C.CF_OPERATION_INFO)
@@ -965,7 +1023,8 @@ class Provider:
                 self.log(f"[vfs] TRANSFER_PLACEHOLDERS -> {C.hr_str(hr)}")
             # 전송(탐색기 응답)을 먼저 끝낸 뒤 서버에서 사라진 항목을 정리 — SMB처럼
             # 삭제도 열 때 바로 반영된다. (백그라운드 reconcile 과는 락으로 직렬화)
-            if self.always_fresh:
+            # 캐시로 응답한 버스트 열거는 수 초 전에 이미 정리했으므로 건너뛴다.
+            if self.always_fresh and not from_cache:
                 with self._reconcile_lock:
                     try:
                         existing2 = set(os.listdir(local))

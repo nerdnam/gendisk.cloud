@@ -37,7 +37,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # numpy: PIL 훅이 환경에 numpy 가 있으면 통째로(OpenBLAS ~20MB) 끌고 들어온다.
+    # 이 앱의 PIL 사용(아이콘 렌더)에는 불필요 — 제외해 exe 를 ~12MB 줄인다.
+    excludes=['numpy', 'scipy', 'matplotlib'],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
