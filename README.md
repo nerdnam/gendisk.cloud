@@ -16,6 +16,7 @@ ghcr.io/nerdnam/gendisk.cloud  (linux/amd64, linux/arm64)
 - [주요 기능](#주요-기능)
 - [클라이언트 앱 (데스크톱·모바일)](#클라이언트-앱-데스크톱모바일)
 - [빠른 시작](#빠른-시작)
+- [도커 없이 설치 (Python 직접 실행)](#도커-없이-설치-python-직접-실행)
 - [compose.yaml 설정](#composeyaml-설정)
 - [외부 저장소 (도커 볼륨 마운트)](#외부-저장소-도커-볼륨-마운트)
 - [계정 관리](#계정-관리)
@@ -116,6 +117,74 @@ docker compose up -d
 브라우저에서 `http://서버주소:8000` 접속 → 첫 화면에서 **관리자 계정을 만들면 바로 사용 시작**됩니다.
 
 > 소스에서 직접 빌드하려면: `git clone https://github.com/nerdnam/gendisk.cloud.git` 후 `docker compose up -d --build`
+
+---
+
+## 도커 없이 설치 (Python 직접 실행)
+
+도커를 못 쓰는 환경(구형 NAS, 공유 호스팅, 저사양 SBC 등)에서는 Python으로 직접 실행할 수 있습니다.
+**Python 3.11 이상**이 필요합니다.
+
+### 1. 소스 받기 + 의존성 설치
+
+```bash
+git clone https://github.com/nerdnam/gendisk.cloud.git
+cd gendisk.cloud
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 2. 실행
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+브라우저에서 `http://서버주소:8000` 접속 → 관리자 계정을 만들면 바로 사용됩니다.
+데이터(계정 DB·업로드 파일·썸네일)는 소스 폴더 안 `data/` 에 자동 생성·저장됩니다 —
+백업할 때는 이 폴더만 챙기면 됩니다.
+
+- **외부 저장소 연결**: 도커의 `/app/mounts/<이름>` 볼륨 대신, 소스 폴더 안 `mounts/` 아래에
+  폴더(또는 심볼릭 링크)를 만들면 저장소로 나타납니다. `NCLOUD_MOUNTS_DIR` 환경변수로
+  mounts 위치를 바꿀 수 있습니다.
+- **주의**: `--workers` 옵션 없이 단일 프로세스로 실행하세요. 실시간 알림(SSE)이
+  프로세스 내부에서 동작하므로 멀티 워커에서는 실시간 반영이 일부 누락됩니다.
+
+### 3. 부팅 시 자동 시작 (systemd 예시)
+
+`/etc/systemd/system/gendisk.service`:
+
+```ini
+[Unit]
+Description=genDISK
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/gendisk.cloud
+ExecStart=/opt/gendisk.cloud/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+User=gendisk
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now gendisk
+```
+
+### 4. 업데이트
+
+```bash
+cd gendisk.cloud
+git pull
+.venv/bin/pip install -r requirements.txt
+sudo systemctl restart gendisk    # 또는 uvicorn 재시작
+```
+
+> 인터넷에 공개할 거라면 Nginx/Caddy/Cloudflare Tunnel 등으로 **HTTPS**를 앞단에 두는 것을
+> 권장합니다. 앱·동기화 클라이언트는 https 주소를 기준으로 동작합니다.
 
 ---
 
