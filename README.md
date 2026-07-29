@@ -9,6 +9,10 @@ FastAPI 백엔드 + 순수 JS 웹 UI 단일 컨테이너로 구성되어, 도커
 ghcr.io/nerdnam/gendisk.cloud  (linux/amd64, linux/arm64)
 ```
 
+**공식 앱**: [iOS (App Store)](https://apps.apple.com/kr/app/gendisk/id6790139971) ·
+[macOS — genDISK Drive (App Store)](https://apps.apple.com/kr/app/gendisk-drive/id6790317436?mt=12) ·
+Windows/Android은 [클라이언트 앱](#클라이언트-앱-데스크톱모바일) 참고
+
 ---
 
 ## 목차
@@ -81,9 +85,12 @@ ghcr.io/nerdnam/gendisk.cloud  (linux/amd64, linux/arm64)
 - **일반 WebDAV 접속** — genDISK 외 임의 WebDAV 서버에도 연결 (포트 지정 지원)
 - Kotlin · Jetpack Compose
 
-### iOS · macOS
-- **iOS** — SwiftUI 앱 (개발 중)
-- **macOS** — Finder **File Provider** 확장으로 다른 클라우드처럼 동기화 (개발 중, 서버 `/api/sync` 규격 사용)
+### iOS — [App Store](https://apps.apple.com/kr/app/gendisk/id6790139971)
+- **genDISK** — SwiftUI 앱. 파일 탐색·업로드, 사진/동영상 미리보기, **QR 로그인**
+
+### macOS — [App Store](https://apps.apple.com/kr/app/gendisk-drive/id6790317436?mt=12)
+- **genDISK Drive** — Finder **File Provider** 확장. 다른 클라우드처럼 Finder 사이드바에 드라이브로 나타나고, 파일은 열 때 온디맨드로 내려받습니다
+- 서버 실시간 알림(`/api/sync/events`, SSE)으로 다른 기기의 변경이 즉시 반영됩니다
 
 > 모바일·macOS 앱 소스는 각자 서명/빌드가 필요해 별도로 관리됩니다.
 
