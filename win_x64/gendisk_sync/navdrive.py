@@ -40,6 +40,18 @@ def _set(hive, path, name, value, t=winreg.REG_SZ):
         winreg.CloseKey(k)
 
 
+def _get(hive, path, name):
+    """레지스트리 값 읽기 (없으면 None). 멱등 등록 검사용."""
+    try:
+        k = winreg.OpenKey(hive, path, 0, winreg.KEY_READ | _WOW64)
+        try:
+            return winreg.QueryValueEx(k, name)[0]
+        finally:
+            winreg.CloseKey(k)
+    except OSError:
+        return None
+
+
 def _del_tree(hive, path):
     try:
         k = winreg.OpenKey(hive, path, 0, winreg.KEY_READ | winreg.KEY_WRITE | _WOW64)
@@ -113,14 +125,45 @@ def set_folder_icon(root: str, icon: str):
         pass
 
 
+def _already_registered(root: str, icon: str, srid: str, sid: str) -> bool:
+    """핵심 값들이 이미 동일하게 등록돼 있는지 검사한다.
+    같으면 재등록을 통째로 생략 — 재등록 끝의 SHChangeNotify(ASSOCCHANGED)가 전체
+    아이콘 캐시를 무효화해 바탕화면 아이콘·오버레이가 앱을 켤 때마다 깜빡이던 것 방지."""
+    srm = _SRM + "\\" + srid
+    if _get(_HKLM, srm, "NamespaceCLSID") != NS_CLSID:
+        return False
+    if _get(_HKLM, srm, "IconResource") != icon + ",0":
+        return False
+    if _get(_HKLM, srm + r"\UserSyncRoots", sid) != root:
+        return False
+    for croot in _CLSID_ROOTS:
+        base = croot + "\\" + NS_CLSID
+        if _get(_HKCU, base + r"\Instance\InitPropertyBag", "TargetFolderPath") != root:
+            return False
+        if _get(_HKCU, base + r"\DefaultIcon", None) != icon + ",0":
+            return False
+    if _get(_HKCU, _EXPLORER + r"\Desktop\NameSpace" + "\\" + NS_CLSID, None) != DISPLAY_NAME:
+        return False
+    return True
+
+
 def register_drive(root: str, icon: str, sid: str = None):
     """탐색기 사이드바에 'genDISK Drive' 브랜디드 드라이브 노드를 등록한다(관리자 불필요).
 
     icon 은 반드시 영구 로컬 경로(.ico)여야 한다 — PyInstaller onefile 의 _MEIPASS
     임시경로를 쓰면 종료 후 아이콘이 사라진다. 앱은 시작 시 아이콘을 %LOCALAPPDATA%
     아래로 복사하고 그 경로를 넘긴다.
+
+    멱등: 이미 같은 값으로 등록돼 있으면 아무것도 쓰지 않고 전역 아이콘 새로고침도
+    하지 않는다(시작/다시 연결 때마다 바탕화면 아이콘이 깜빡이지 않게).
     """
     sid = sid or current_sid()
+    srid = sync_root_id(sid)
+    if _already_registered(root, icon, srid, sid):
+        # 폴더 아이콘(desktop.ini)만 유실됐으면 조용히 복구
+        if not os.path.exists(os.path.join(root, "desktop.ini")):
+            set_folder_icon(root, icon)
+        return srid
     set_folder_icon(root, icon)
     # (1) HKCU 셸 네임스페이스 확장 CLSID (64/32비트) — 위임 폴더
     for croot in _CLSID_ROOTS:
