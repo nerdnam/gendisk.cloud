@@ -41,19 +41,33 @@ def is_primary() -> bool:
     return True
 
 
-def signal_existing():
-    """이미 실행 중인 인스턴스에 창을 띄우라고 신호(best-effort)."""
+def signal_existing(msg: bytes = b"show"):
+    """이미 실행 중인 인스턴스에 신호를 보낸다(best-effort).
+    b"show" = 창을 앞으로, b"quit" = 종료 요청(새 버전이 자리를 넘겨받는 업그레이드용)."""
     try:
         with open(_PORT_FILE, encoding="utf-8") as f:
             port = int(f.read().strip())
         with socket.create_connection(("127.0.0.1", port), timeout=1.5) as s:
-            s.sendall(b"show")
+            s.sendall(msg)
     except Exception:
         pass
 
 
-def start_show_listener(on_show):
-    """주 인스턴스: 신호를 받으면 on_show() 를 호출(데몬 스레드에서)."""
+def try_become_primary(timeout: float = 15.0) -> bool:
+    """구 인스턴스가 내려가길 기다렸다가 주 인스턴스 자리를 차지한다(업그레이드 인계).
+    quit 신호를 보낸 뒤 호출한다. 제한시간 안에 뮤텍스를 얻으면 True."""
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if is_primary():
+            return True
+        time.sleep(0.3)
+    return False
+
+
+def start_show_listener(on_show, on_quit=None):
+    """주 인스턴스: b"show" 를 받으면 on_show(), b"quit" 을 받으면 on_quit() 호출
+    (데몬 스레드에서). on_quit 이 없으면 quit 신호는 무시한다."""
     global _srv
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -76,8 +90,9 @@ def start_show_listener(on_show):
                 conn, _ = s.accept()
             except OSError:
                 break
+            data = b""
             try:
-                conn.recv(64)
+                data = conn.recv(64)
             except OSError:
                 pass
             finally:
@@ -86,7 +101,10 @@ def start_show_listener(on_show):
                 except OSError:
                     pass
             try:
-                on_show()
+                if data.strip() == b"quit" and on_quit is not None:
+                    on_quit()      # 새 버전이 자리를 넘겨받는 중 — 조용히 종료
+                else:
+                    on_show()
             except Exception:
                 pass
 

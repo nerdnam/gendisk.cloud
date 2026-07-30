@@ -109,8 +109,11 @@ class App:
         self._build_tray()
         self._refresh_transfers()               # 전송 현황 주기 갱신 시작
         # 두 번째 실행이 신호를 보내면 이 창을 전면화한다(단일 인스턴스).
+        # quit 신호(새 버전의 업그레이드 인계)를 받으면 조용히 종료해 자리를 내준다.
         try:
-            single_instance.start_show_listener(self._bring_to_front)
+            single_instance.start_show_listener(
+                self._bring_to_front,
+                on_quit=lambda: self.root.after(0, self._real_quit))
         except Exception:
             pass
         # genDISK Drive 가 켜져 있고 로그인돼 있으면 시작 시 연결

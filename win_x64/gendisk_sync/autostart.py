@@ -37,6 +37,29 @@ def _ensure_stable_copy() -> str:
         return stable if os.path.isfile(stable) else src
 
 
+def stale_stable_copy() -> bool:
+    """이 프로세스가 안정 사본이 아닌 exe(새 빌드 등)로 실행됐고, 안정 사본과 내용이
+    다르면 True — 업그레이드 인계(구 인스턴스 종료 후 자리 차지)가 필요하다는 뜻."""
+    if not getattr(sys, "frozen", False):
+        return False
+    src = sys.executable
+    stable = _stable_exe()
+    try:
+        if os.path.abspath(src) == os.path.abspath(stable):
+            return False
+        return (not os.path.isfile(stable)
+                or os.path.getsize(stable) != os.path.getsize(src))
+    except OSError:
+        return False
+
+
+def refresh_stable_copy():
+    """안정 사본을 현재 실행 중인 exe 로 갱신한다(업그레이드 인계 후 호출).
+    자동시작 여부와 무관 — 다음에 안정 사본을 실행해도 새 버전이 뜨게 한다."""
+    if getattr(sys, "frozen", False):
+        _ensure_stable_copy()
+
+
 def _command() -> str:
     """자동 시작 시 실행할 명령. --startup 플래그로 시작하면 창을 최소화한다."""
     if getattr(sys, "frozen", False):          # PyInstaller .exe
