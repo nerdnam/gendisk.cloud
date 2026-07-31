@@ -94,7 +94,7 @@ class App:
         self._pw = self.cfg.get_password()
         self.root = ctk.CTk()
         self.root.title("genDISK")
-        self.root.geometry("1120x860")   # 2열 배치 — 전송 현황 패널까지 스크롤 없이 맞는 높이
+        self.root.geometry("1120x1020")  # 2열 배치 — 드라이브 옵션·상태 로그까지 스크롤 없이 보이는 높이
         self.root.minsize(980, 760)
         self._apply_window_icon()
         self.transfers = TransferTracker()      # 진행 중 전송(업로드) 추적 → 상태 패널
