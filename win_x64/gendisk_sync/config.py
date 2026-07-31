@@ -44,6 +44,9 @@ class Config:
     # 드라이브 자체는 SMB처럼 동작한다(폴더를 열 때마다 서버 최신 목록).
     # 이 옵션은 '백그라운드 자동 반영'(SSE 실시간 + 주기 폴링)을 추가로 켤지 여부다.
     vfs_sync: bool = True
+    # 무저장(SMB식): 파일 데이터를 컴퓨터에 남기지 않는다 — 업로드한 드롭 파일은 즉시,
+    # 열람한 파일은 잠시 후 온라인 전용으로 되돌린다('항상 이 장치에 유지' 고정은 예외).
+    vfs_free_space: bool = True
     # 일반(범용) WebDAV 서버 연결 목록. 각 항목은 dict:
     #   {name, url, username, password_enc(DPAPI), drive, auto(bool)}
     # genDISK 서버 마운트와 별개로, 임의 WebDAV 서버(NAS/Nextcloud 등)를 드라이브로 연결.

@@ -399,6 +399,7 @@ CfGetPlaceholderStateFromAttributeTag.restype = DWORD    # CF_PLACEHOLDER_STATE
 CfGetPlaceholderStateFromAttributeTag.argtypes = [DWORD, DWORD]
 
 FILE_ATTRIBUTE_OFFLINE = 0x00001000        # 디하이드레이트(로컬 데이터 없음) — 드롭 파일 아님
+FILE_ATTRIBUTE_PINNED = 0x00080000         # 탐색기 '항상 이 장치에 유지' — 공간 확보에서 제외
 
 # HRESULT CfUpdatePlaceholder(HANDLE, CF_FS_METADATA*(opt), LPCVOID FileIdentity, DWORD,
 #   CF_FILE_RANGE*(opt), DWORD, CF_UPDATE_FLAGS, USN*(opt), LPOVERLAPPED(opt))

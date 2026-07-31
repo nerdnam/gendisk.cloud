@@ -213,6 +213,11 @@ class DriveController:
         업로드(드롭 파일 감지)는 드라이브의 기본 기능이라 항상 돈다."""
         return bool(getattr(self.cfg, "vfs_sync", True))
 
+    def _free_space_enabled(self) -> bool:
+        """무저장(SMB식) — 파일 데이터를 컴퓨터에 남기지 않고 서버에만 둔다.
+        업로드한 드롭 파일은 즉시, 열람한 파일은 잠시 후 온라인 전용으로 되돌린다."""
+        return bool(getattr(self.cfg, "vfs_free_space", True))
+
     def _refresh_loop(self):
         interval = max(15, int(getattr(self.cfg, "interval_sec", 30) or 30))
         stop = self._refresh_stop
@@ -241,6 +246,11 @@ class DriveController:
                 prov.upload_scan()           # 로컬→원격: 드롭한 파일 업로드 + '보류중' 해소
             except Exception as e:           # noqa: BLE001
                 self.log(f"[drive] upload loop: {e!r}")
+            if self._free_space_enabled():   # 무저장: 열람으로 쌓인 로컬 데이터 되돌림
+                try:
+                    prov.reclaim_space()
+                except Exception as e:       # noqa: BLE001
+                    self.log(f"[drive] reclaim loop: {e!r}")
             if stop.wait(interval):          # 반영 후 대기 — 중지 신호면 종료
                 break
 
@@ -354,6 +364,11 @@ class DriveController:
             prov.upload_scan()
         except Exception as e:  # noqa: BLE001
             self.log(f"[drive] upload scan now: {e!r}")
+        if self._free_space_enabled():
+            try:
+                prov.reclaim_space()
+            except Exception as e:  # noqa: BLE001
+                self.log(f"[drive] reclaim now: {e!r}")
         return n
 
     def restart(self):
@@ -472,6 +487,7 @@ class DriveController:
                                 # 자동 반영 켬 = 빠른 로컬 탐색(폴더 고정) + 백그라운드가
                                 # SSE/delta/deep refresh 로 최신화 — 탐색기가 안 기다린다.
                                 always_fresh=not self._sync_enabled(),
+                                free_space=self._free_space_enabled(),
                                 space=self.cfg.space, log=self.log)
             prov.register()
             prov.connect()                 # 내부에서 populate_root()

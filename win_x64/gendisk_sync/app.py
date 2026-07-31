@@ -541,6 +541,15 @@ class App:
             c, "끄면 SMB처럼 폴더를 열 때마다 서버에서 최신 목록을 가져옵니다(항상 정확).\n"
                "켜면 백그라운드로 실시간 반영되고 폴더 열기는 로컬이라 훨씬 빠릅니다.").pack(
             fill="x", pady=(2, 0))
+        # 무저장(SMB식): 파일 데이터를 로컬에 남기지 않음 — 사용자 요청 기본 켬.
+        self.var_free_space = tk.BooleanVar(value=getattr(self.cfg, "vfs_free_space", True))
+        ctk.CTkSwitch(c, text="디스크 공간 자동 확보 (파일을 컴퓨터에 남기지 않음)",
+                      variable=self.var_free_space,
+                      command=self._toggle_free_space).pack(anchor="w", pady=(8, 0))
+        self._field_label(
+            c, "업로드한 파일은 즉시, 열어본 파일은 잠시 후 서버에만 남기고 로컬에서 비웁니다.\n"
+               "탐색기에서 '항상 이 장치에 유지'로 고정한 파일은 남겨둡니다.").pack(
+            fill="x", pady=(2, 0))
         vrow = ctk.CTkFrame(c, fg_color="transparent")
         vrow.pack(fill="x", pady=(8, 0))
         self.btn_drive_refresh = ctk.CTkButton(
@@ -879,6 +888,30 @@ class App:
                 self.log(f"드라이브 동기화 설정 적용: {mode}")
             except Exception as e:  # noqa: BLE001
                 self.log(f"동기화 설정 적용 실패: {e}")
+                self.set_status("genDISK Drive 연결 실패", DANGER)
+                self.cfg.vfs_enabled = False
+                self.cfg.save()
+                self.root.after(0, lambda: self.var_vfs.set(False))
+            finally:
+                self._set_drive_buttons(False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _toggle_free_space(self):
+        """무저장(디스크 공간 자동 확보) 켬/끔 — 저장하고, 드라이브가 켜져 있으면 재연결로 적용."""
+        self.cfg.vfs_free_space = self.var_free_space.get()
+        self.cfg.save()
+        mode = "무저장 켬 (컴퓨터에 안 남김)" if self.cfg.vfs_free_space else "무저장 끔 (로컬 캐시 유지)"
+        if not self.drive.running:
+            self.log(f"드라이브 공간 설정 저장: {mode} (다음 연결부터 적용)")
+            return
+        self._set_drive_buttons(True, reconnect_text="적용 중…")
+
+        def work():
+            try:
+                self.drive.restart()
+                self.log(f"드라이브 공간 설정 적용: {mode}")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"공간 설정 적용 실패: {e}")
                 self.set_status("genDISK Drive 연결 실패", DANGER)
                 self.cfg.vfs_enabled = False
                 self.cfg.save()

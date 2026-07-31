@@ -42,6 +42,7 @@ class Provider:
     def __init__(self, root: str, provider_guid: str, fetch_range, list_dir=None,
                  list_spaces=None, upload=None, delete=None, rename=None, mkdir=None,
                  notify=None, progress=None, state_path=None, always_fresh=True,
+                 free_space=True,
                  space: str = "home", provider_name: str = "genDISK",
                  identity: bytes = b"genDISK", log=print):
         self.root = os.path.abspath(root)
@@ -62,6 +63,10 @@ class Provider:
         # SMB식 동작: 폴더를 '채움 완료(고정)'로 표시하지 않아 열 때마다 서버 목록을
         # 다시 조회한다 → 탐색기가 항상 서버의 현재 상태를 보여준다(네트워크 드라이브처럼).
         self.always_fresh = bool(always_fresh)
+        # SMB처럼 파일 데이터를 컴퓨터에 남기지 않는다: 업로드한 드롭 파일은 즉시,
+        # 열람으로 받아진 파일은 잠시 후(reclaim_space) 온라인 전용으로 되돌린다.
+        self.free_space = bool(free_space)
+        self._hydrate_times = {}            # local_path -> 마지막 하이드레이션 활동(monotonic)
         self._space_map = {}                # 폴더이름 -> space id (다중 저장소)
         # 원격 변경 반영(refresh)용: 지금까지 실제로 열려 채워진 폴더들의 rel 경로.
         # refresh 는 이 폴더들만 서버와 대조해 새 항목을 추가한다(온디맨드 유지 + 작업량 최소).
@@ -507,6 +512,19 @@ class Provider:
                 self._suppress_delete.discard(crel)
                 self.log(f"[vfs] remove '{crel}': {e!r}")
 
+    def _scan_targets(self) -> set:
+        """로컬 스캔 대상 폴더(rel) 집합: 루트 + 저장소 폴더 + 열었던 폴더(영속)."""
+        targets = set(self._populated_dirs)
+        targets.add("")
+        if self.list_spaces is not None:
+            if not self._space_map:
+                try:
+                    self._space_entries()
+                except Exception:  # noqa: BLE001
+                    pass
+            targets.update(self._space_map.keys())
+        return targets
+
     # ---------------------------------------------------------------- 로컬→원격 업로드
     def _upload_target(self, frel: str):
         """드라이브 상대경로(frel) → (space_id, 서버 경로). 매핑 불가면 None."""
@@ -524,7 +542,8 @@ class Provider:
         return self.space, frel
 
     def _mark_uploaded(self, local_path: str, identity: dict):
-        """업로드된 실제 파일을 in-sync 플레이스홀더로 변환 → '동기화 보류중' 해소."""
+        """업로드된 실제 파일을 in-sync 플레이스홀더로 변환 → '동기화 보류중' 해소.
+        free_space(SMB식 무저장)면 파일 데이터도 함께 비워(DEHYDRATE) 서버에만 남긴다."""
         ident = json.dumps(identity).encode("utf-8")
         idbuf = ctypes.create_string_buffer(ident, len(ident))
         h = C.CreateFileW(local_path, C.GENERIC_READ | C.GENERIC_WRITE,
@@ -533,8 +552,16 @@ class Provider:
         if not h or h == C.INVALID_HANDLE_VALUE:
             raise OSError(f"CreateFileW 실패(err={ctypes.get_last_error()}): {local_path}")
         try:
+            flags = C.CF_CONVERT_FLAG_MARK_IN_SYNC
+            if self.free_space and not identity.get("dir"):
+                flags |= C.CF_CONVERT_FLAG_DEHYDRATE      # 로컬 데이터 즉시 비움(서버에만 저장)
             hr = C.CfConvertToPlaceholder(h, ctypes.cast(idbuf, C.LPCVOID), len(ident),
-                                          C.CF_CONVERT_FLAG_MARK_IN_SYNC, None, None)
+                                          flags, None, None)
+            if not C.hr_ok(hr) and (flags & C.CF_CONVERT_FLAG_DEHYDRATE):
+                # 일부 상태(핸들 공유 등)에서 DEHYDRATE 동반 변환이 거부될 수 있다 —
+                # 변환만이라도 성공시키고 데이터 비움은 reclaim_space 가 이어받는다.
+                hr = C.CfConvertToPlaceholder(h, ctypes.cast(idbuf, C.LPCVOID), len(ident),
+                                              C.CF_CONVERT_FLAG_MARK_IN_SYNC, None, None)
             if not C.hr_ok(hr):
                 raise OSError(f"CfConvertToPlaceholder {C.hr_str(hr)}")
         finally:
@@ -549,15 +576,7 @@ class Provider:
         대상 폴더는 refresh 와 동일(루트 + 저장소 폴더 + 이번 세션에 연 폴더)."""
         if self.upload is None and self.mkdir is None:
             return 0
-        targets = set(self._populated_dirs)
-        targets.add("")
-        if self.list_spaces is not None:
-            if not self._space_map:
-                try:
-                    self._space_entries()
-                except Exception:  # noqa: BLE001
-                    pass
-            targets.update(self._space_map.keys())
+        targets = self._scan_targets()
         uploaded = 0
         live = set()
         for rel in list(targets):
@@ -794,6 +813,9 @@ class Provider:
                     self._schedule_dehydrate(local_path)
                 return
             transferred += len(data)
+            if local_path:
+                # 공간 확보(reclaim_space) 유예 판단용 — 마지막 하이드레이션 활동 시각.
+                self._hydrate_times[local_path] = time.monotonic()
             if show_prog:
                 self.progress(pkey, dname, "down",
                               min(file_size, offsets[i] + len(data)), file_size)
@@ -895,24 +917,81 @@ class Provider:
         threading.Thread(target=self._dehydrate, args=(local_path,),
                          name="gendisk-dehydrate", daemon=True).start()
 
-    def _dehydrate(self, local_path: str):
-        """플레이스홀더를 온디맨드(빈) 상태로 되돌린다 — 취소로 남은 부분 데이터를 버려
-        파일이 꼬이지 않게 하고, 다음에 열면 깨끗하게 다시 받는다. best-effort."""
+    def _dehydrate(self, local_path: str, quiet: bool = False) -> bool:
+        """플레이스홀더의 로컬 데이터를 비워 온라인 전용으로 되돌린다. best-effort.
+        (취소된 다운로드의 부분 데이터 정리와 공간 확보 양쪽에서 쓴다)"""
         h = C.CreateFileW(local_path, C.GENERIC_READ | C.GENERIC_WRITE,
                           C.FILE_SHARE_READ | C.FILE_SHARE_WRITE | C.FILE_SHARE_DELETE,
                           None, C.OPEN_EXISTING, C.FILE_FLAG_BACKUP_SEMANTICS, None)
         if not h or h == C.INVALID_HANDLE_VALUE:
-            return   # 사용 중 등으로 못 열면 조용히 포기
+            return False   # 사용 중 등으로 못 열면 조용히 포기(다음에 재시도)
         try:
             hr = C.CfDehydratePlaceholder(h, 0, -1, C.CF_DEHYDRATE_FLAG_NONE, None)
             if C.hr_ok(hr):
                 self.log(f"[vfs] reset(dehydrate) {local_path}")
-            else:
+                return True
+            if not quiet:
                 self.log(f"[vfs] dehydrate {C.hr_str(hr)}: {local_path}")
+            return False
         except Exception as e:  # noqa: BLE001
-            self.log(f"[vfs] dehydrate error: {e!r}")
+            if not quiet:
+                self.log(f"[vfs] dehydrate error: {e!r}")
+            return False
         finally:
             C.CloseHandle(h)
+
+    # ------------------------------------------------------------ 공간 확보 (무저장)
+    RECLAIM_GRACE_SEC = 300     # 마지막 열람 후 이 시간 안에는 로컬 데이터를 비우지 않음
+
+    def reclaim_space(self) -> int:
+        """열람(하이드레이션)으로 로컬에 쌓인 파일 데이터를 온라인 전용으로 되돌려
+        디스크를 비운다 — SMB처럼 컴퓨터에 파일을 저장하지 않는다. 안전 규칙:
+          · in-sync placeholder 파일만 (사용자 수정/드롭 파일 불가침)
+          · 탐색기 '항상 이 장치에 유지'(PINNED) 고정 파일은 존중
+          · 최근 열람(RECLAIM_GRACE_SEC 이내)은 유예 — 재생/편집 중 재다운로드 방지
+          · 사용 중이라 실패하면 다음 사이클에 재시도 (best-effort)"""
+        now = time.monotonic()
+        freed = 0
+        for rel in list(self._scan_targets()):
+            local = self.root if rel == "" else os.path.join(
+                self.root, rel.replace("/", os.sep))
+            if not os.path.isdir(local):
+                continue
+            try:
+                entries = list(os.scandir(local))
+            except OSError:
+                continue
+            for de in entries:
+                if de.name.lower() == "desktop.ini" or de.name.startswith("."):
+                    continue
+                try:
+                    if de.is_dir(follow_symlinks=False):
+                        continue
+                    st = de.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                attrs = getattr(st, "st_file_attributes", 0)
+                if attrs & C.FILE_ATTRIBUTE_OFFLINE:
+                    continue                  # 이미 온라인 전용(로컬 데이터 없음)
+                if attrs & C.FILE_ATTRIBUTE_PINNED:
+                    continue                  # 사용자가 로컬 유지를 선택한 파일
+                state = C.CfGetPlaceholderStateFromAttributeTag(
+                    attrs, getattr(st, "st_reparse_tag", 0))
+                if state == C.CF_PLACEHOLDER_STATE_INVALID or not (
+                        state & C.CF_PLACEHOLDER_STATE_PLACEHOLDER) or not (
+                        state & C.CF_PLACEHOLDER_STATE_IN_SYNC):
+                    continue                  # 사용자 신규/수정 파일은 절대 안 건드림
+                if st.st_size == 0:
+                    continue
+                t = self._hydrate_times.get(de.path)
+                if t is not None and now - t < self.RECLAIM_GRACE_SEC:
+                    continue                  # 방금 읽은 파일 — 유예
+                if self._dehydrate(de.path, quiet=True):
+                    self._hydrate_times.pop(de.path, None)
+                    freed += 1
+        if freed:
+            self.log(f"[vfs] 공간 확보: {freed}개 파일을 온라인 전용으로 되돌림")
+        return freed
 
     def _update_identity(self, local_path: str, identity: dict):
         """placeholder 의 FileIdentity(서버 경로)를 갱신하고 in-sync 로 표시한다.
