@@ -590,6 +590,8 @@ class App:
         if not url or not user or not pw:
             self.lbl_login_error.configure(text="서버 주소·아이디·비밀번호를 모두 입력하세요.")
             return
+        if "://" not in url:   # WebDAV 모드처럼 스킴 생략 허용 (없으면 urlopen이 ValueError)
+            url = "https://" + url
         self.lbl_login_error.configure(text="")
         self.cfg.save_credentials = self.var_savecred.get()
         try:
@@ -609,7 +611,7 @@ class App:
                 self._start_drive_async()
         except AuthError as e:
             self.lbl_login_error.configure(text=str(e))
-        except (ApiError, OSError) as e:
+        except (ApiError, OSError, ValueError) as e:
             self.lbl_login_error.configure(text=str(e))
 
     def _webdav_login(self):
