@@ -26,6 +26,7 @@ Windows/Android은 [클라이언트 앱](#클라이언트-앱-데스크톱모바
 - [계정 관리](#계정-관리)
 - [외부 공유 (링크로 공유)](#외부-공유-링크로-공유)
 - [네트워크 드라이브로 마운트 (WebDAV)](#네트워크-드라이브로-마운트-webdav)
+- [FTP 접속](#ftp-접속)
 - [Homepage 대시보드 위젯](#homepage-대시보드-위젯)
 - [업데이트 및 버전 관리](#업데이트-및-버전-관리)
 - [프로젝트 구조](#프로젝트-구조)
@@ -76,6 +77,7 @@ Windows/Android은 [클라이언트 앱](#클라이언트-앱-데스크톱모바
 
 ### Windows — [win_x64/](win_x64/README.md)
 - **genDISK Drive** — iCloud처럼 **탐색기 사이드바에 온디맨드 드라이브**로 나타납니다. 목록만 먼저 보이고, 파일을 열 때 자동으로 내려받습니다 (Windows Cloud Files API).
+  파일 전송을 HTTPS API 대신 **서버 내장 FTP로 보내는 옵션**도 있습니다 ([FTP 접속](#ftp-접속))
 - **WebDAV 드라이브 연결** — genDISK를 네트워크 드라이브로 마운트
 - **일반 WebDAV 클라이언트** — NAS·Nextcloud 등 **임의의 WebDAV 서버**를 드라이브로 연결·관리 (여러 접속 프로파일 저장/전환)
 - 폴더 동기화(`/api/sync`), 시작 시 자동 실행, 시스템 트레이 상주. 서명 없이 단일 exe로 동작하며 main push마다 CI가 빌드합니다.
@@ -307,6 +309,44 @@ compose.yaml 수정 후 `docker compose up -d`로 다시 올리면 반영됩니�
 
 **표준 WebDAV 클라이언트**(Windows 탐색기·macOS Finder·rclone·Cyberduck 등)와 호환되도록 잠금(`supportedlock`/`lockdiscovery`)·콘텐츠 타입·용량(RFC 4331) 속성과 ISO-8601 생성일을 제공합니다. 지원 메서드: OPTIONS, PROPFIND, GET, HEAD, PUT, DELETE, MKCOL, MOVE, COPY, LOCK, UNLOCK, PROPPATCH.
 
+---
+
+## FTP 접속
+
+서버에 **FTP(S) 서버가 내장**되어 있어, FileZilla·WinSCP·탐색기(`ftp://`) 같은 표준 FTP 클라이언트로도 접속할 수 있습니다. 웹/WebDAV와 같은 계정으로 로그인하며, 루트에 `home`(개인 저장소)과 접근 권한이 있는 외부 저장소가 폴더로 나타납니다. 저장소 접근 권한·읽기 전용·용량 제한 규칙이 그대로 적용되고, FTP로 올리거나 지운 파일도 웹 UI·클라이언트에 실시간 반영됩니다.
+
+### 서버에서 켜기
+
+기본은 꺼져 있습니다. compose에 환경변수와 포트를 추가하면 켜집니다:
+
+```yaml
+    ports:
+      - "8000:8000"
+      - "2121:2121"                  # FTP 제어 포트
+      - "60000-60019:60000-60019"    # 패시브 데이터 포트 (제어 포트와 함께 필수!)
+    environment:
+      - GENDISK_FTP_PORT=2121
+      - GENDISK_FTP_PASSIVE_PORTS=60000-60019
+      - GENDISK_FTP_MASQUERADE=서버의_외부_IP    # NAT/도커 뒤에서는 필수
+```
+
+| 환경변수 | 설명 |
+|----------|------|
+| `GENDISK_FTP_PORT` | 설정해야 FTP가 켜집니다 (예: 2121) |
+| `GENDISK_FTP_PASSIVE_PORTS` | 패시브 데이터 포트 범위 (기본 `60000-60019`) — 방화벽/포트포워딩에 **반드시 함께** 열어야 합니다 |
+| `GENDISK_FTP_MASQUERADE` | 패시브 응답에 실을 외부 IP. 도커 브리지/NAT 뒤에서는 컨테이너 내부 IP가 광고되므로 **꼭 지정**하세요 (LAN이면 호스트 LAN IP, 인터넷 공개면 공인 IP) |
+| `GENDISK_FTP_TLS_CERT` / `GENDISK_FTP_TLS_KEY` | 인증서·키 경로를 주면 **FTPS**(explicit TLS)로 동작 |
+
+### 접속
+
+- **FileZilla/WinSCP** — 호스트 `서버주소`, 포트 `2121`, 사용자/비밀번호는 genDISK 계정
+- **Windows 탐색기** — 주소창에 `ftp://서버주소:2121` (평문 FTP만 지원)
+- **Windows 클라이언트 앱** — 설정의 **"FTP 전송 사용"**을 켜면 genDISK Drive(탐색기 사이드바)의 파일 전송이 FTP로 동작합니다 (실시간 반영은 HTTPS API 유지)
+
+> ⚠️ **Cloudflare는 FTP를 프록시하지 않습니다.** 접속 주소는 프록시 도메인이 아니라 **서버의 실제 주소**(LAN IP, VPN 주소, 또는 DNS-only 레코드)여야 합니다.
+>
+> ⚠️ 평문 FTP는 비밀번호와 데이터가 암호화되지 않습니다. **인터넷에 여는 경우 FTPS**(`GENDISK_FTP_TLS_*`)를 설정하거나 VPN 안에서만 사용하세요.
+
 ## 데스크톱 동기화 (Mac 스토리지 프로바이더)
 
 genDISK를 Finder(macOS)나 탐색기(Windows)에서 다른 클라우드 서비스(Dropbox 등)와 동일하게 탐색·동기화할 수 있도록 백엔드가 동기화 API를 제공합니다. **Windows 클라이언트**가 이 API로 폴더를 동기화하고, **macOS File Provider 앱**도 같은 규격을 사용합니다.
@@ -435,6 +475,7 @@ gendisk.cloud/
 │   ├── shares.py             #   외부 공유 링크 (생성·관리 + 공개 열람 엔드포인트)
 │   ├── sync.py               #   데스크톱 동기화 API (/api/sync)
 │   ├── webdav.py             #   /dav WebDAV 엔드포인트 (표준 클라이언트 호환)
+│   ├── ftp.py                #   내장 FTP(S) 서버 (GENDISK_FTP_PORT 설정 시)
 │   ├── serverinfo.py         #   Nextcloud 호환 serverinfo (Homepage 위젯)
 │   └── database.py           #   SQLite 초기화 및 스키마 마이그레이션
 ├── static/                   # 웹 UI (프레임워크 없는 순수 HTML/CSS/JS)
@@ -457,7 +498,7 @@ data/
 └── thumbs/                   # 썸네일 캐시 (지워도 자동 재생성)
 ```
 
-의존성은 5개뿐입니다: `fastapi`, `uvicorn`, `python-multipart`, `pillow`, `qrcode`.
+핵심 의존성: `fastapi`, `uvicorn`, `python-multipart`, `pillow`, `qrcode` + FTP용 `pyftpdlib`(·FTPS용 `pyopenssl`).
 
 ---
 
