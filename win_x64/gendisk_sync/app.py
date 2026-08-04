@@ -117,7 +117,10 @@ class App:
         except Exception:
             pass
         # genDISK Drive 가 켜져 있고 로그인돼 있으면 시작 시 연결
-        if self.cfg.vfs_enabled and self.cfg.token:
+        # (FTP 세션은 토큰이 없어도 저장된 비밀번호로 FTP 전송이 가능하면 연결)
+        if self.cfg.vfs_enabled and (
+                self.cfg.token
+                or (self.cfg.is_ftp_session() and self.cfg.get_password())):
             self._start_drive_async()
         # 저장된 일반 WebDAV 연결 중 '자동 연결' 항목을 시작 시 마운트 (genDISK 로그인과 무관)
         if any(m.get("auto") for m in self.cfg.webdav_mounts):
@@ -249,7 +252,7 @@ class App:
             self.container, self.cfg, self.log, on_close=self._close_webdav)
 
         # macOS 앱과 동일: 로그인돼 있으면 설정 화면, 아니면 로그인 화면부터.
-        if self.cfg.token:
+        if self.cfg.token or self.cfg.is_ftp_session():
             self._show_settings()
             self._refresh_spaces_async()   # 저장된 토큰으로 시작 시 저장소 목록 채우기
         else:
@@ -278,7 +281,7 @@ class App:
     def _close_webdav(self):
         """WebDAV 화면에서 '뒤로' — 로그인돼 있으면 설정, 아니면 로그인 화면으로."""
         self.webdav_frame.pack_forget()
-        if self.cfg.token:
+        if self.cfg.token or self.cfg.is_ftp_session():
             self._show_settings()
         else:
             self._show_login()
@@ -308,7 +311,7 @@ class App:
         self.seg_login_mode.pack(pady=(0, 14))
 
         self.e_url = ctk.CTkEntry(pad, width=320,
-                                  placeholder_text="서버 주소 (예: https://gendisk.cloud)")
+                                  placeholder_text="서버 주소 (예: ftp.pureluv.co:2121)")
         self.e_url.pack(pady=4)
         if self.cfg.server_url:  # 빈 값 insert는 placeholder를 없애므로 값이 있을 때만
             self.e_url.insert(0, self.cfg.server_url)
@@ -369,7 +372,7 @@ class App:
             if not cur and self.cfg.server_url:
                 self.e_url.insert(0, self.cfg.server_url)
             self.lbl_login_subtitle.configure(text="로그인하고 파일을 동기화·연결하세요")
-            self.e_url.configure(placeholder_text="서버 주소 (예: https://gendisk.cloud)")
+            self.e_url.configure(placeholder_text="서버 주소 (예: ftp.pureluv.co:2121)")
             self.frm_login_drive.pack_forget()
             self.frm_login_profiles.pack_forget()
             self.btn_login.configure(text="로그인")
@@ -605,35 +608,87 @@ class App:
 
     # ---------- 동작 ----------
     def _login(self):
+        """genDISK 접속 — 높은 호환성을 위해 **FTP 프로토콜만** 사용한다.
+        주소는 ftp:// 스킴·포트를 생략해도 되고(기본 2121, 실패 시 21),
+        https:// 를 넣어도 호스트만 뽑아 FTP 로 접속한다."""
         url = self.e_url.get().strip()
         user = self.e_user.get().strip()
         pw = self.e_pw.get()
         if not url or not user or not pw:
             self.lbl_login_error.configure(text="서버 주소·아이디·비밀번호를 모두 입력하세요.")
             return
-        if "://" not in url:   # WebDAV 모드처럼 스킴 생략 허용 (없으면 urlopen이 ValueError)
-            url = "https://" + url
-        self.lbl_login_error.configure(text="")
-        self.cfg.save_credentials = self.var_savecred.get()
+        raw = url.split("://", 1)[-1].split("/", 1)[0]   # 스킴·경로 제거 → host[:port]
+        host, _, port_s = raw.partition(":")
+        if not host:
+            self.lbl_login_error.configure(text="서버 주소를 확인하세요.")
+            return
         try:
-            c = GenDiskClient(url)
-            c.login(user, pw)
-            self.cfg.server_url, self.cfg.username, self.cfg.token = url, user, c.token
-            self._pw = pw
-            if self.cfg.save_credentials:
-                self.cfg.set_password(pw)
-            else:
-                self.cfg.clear_password()
-            self.cfg.save()
-            self._refresh_spaces(c)
-            self._show_settings()
-            self.log("로그인 성공")
-            if self.cfg.vfs_enabled:
-                self._start_drive_async()
-        except AuthError as e:
-            self.lbl_login_error.configure(text=str(e))
-        except (ApiError, OSError, ValueError) as e:
-            self.lbl_login_error.configure(text=str(e))
+            port = int(port_s) if port_s else None       # None = 기본 포트(2121→21) 시도
+        except ValueError:
+            self.lbl_login_error.configure(text="포트 번호가 올바르지 않습니다.")
+            return
+        self._ftp_login(host, port, user, pw)
+
+    def _ftp_login(self, host: str, port: int | None, user: str, pw: str):
+        """FTP 로그인. 성공하면 FTP 세션으로 전환 — 드라이브(탐색기 사이드바)는
+        FTP 전송으로 동작하고, 동기화·WebDAV 등 API 전용 기능은 쉰다."""
+        self.lbl_login_error.configure(text="")
+        self.btn_login.configure(state="disabled", text="FTP 연결 중…")
+
+        def work():
+            nonlocal port
+            from .ftp_client import FtpDriveClient
+            ports = [port] if port else [2121, 21]
+            spaces = None
+            last_err = None
+            for p in ports:
+                try:
+                    c = FtpDriveClient(host, p, user, pw)
+                    spaces = c.spaces()
+                    c.close()
+                    port = p
+                    break
+                except AuthError as e:
+                    last_err = e                    # 연결은 됐고 비밀번호가 틀림 — 즉시 중단
+                    break
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+            if spaces is None:
+                self.root.after(0, lambda: (
+                    self.btn_login.configure(state="normal", text="로그인"),
+                    self.lbl_login_error.configure(text=str(last_err))))
+                return
+
+            def done():
+                self.btn_login.configure(state="normal", text="로그인")
+                cfg = self.cfg
+                cfg.server_url = f"ftp://{host}:{port}"
+                cfg.username = user
+                cfg.token = ""                     # API 세션 없음 (FTP 전용)
+                cfg.vfs_transport = "ftp"
+                cfg.ftp_host = host
+                cfg.ftp_port = port
+                self._pw = pw
+                cfg.save_credentials = self.var_savecred.get()
+                if cfg.save_credentials:
+                    cfg.set_password(pw)
+                else:
+                    cfg.clear_password()
+                cfg.save()
+                ids = [s["id"] for s in spaces]
+                self.cmb_space.configure(values=ids or ["home"])
+                if cfg.space not in ids:
+                    self.cmb_space.set(ids[0] if ids else "home")
+                self.var_ftp.set(True)
+                self.e_ftp_host.delete(0, "end"); self.e_ftp_host.insert(0, host)
+                self.e_ftp_port.delete(0, "end"); self.e_ftp_port.insert(0, str(port))
+                self._show_settings()
+                self.log(f"FTP 로그인 성공 ({host}:{port}) — 드라이브 전송: FTP\n"
+                         "  (FTP 접속에서는 폴더 동기화·WebDAV 드라이브 등 API 기능이 쉽니다)")
+                if cfg.vfs_enabled:
+                    self._start_drive_async()
+            self.root.after(0, done)
+        threading.Thread(target=work, daemon=True).start()
 
     def _webdav_login(self):
         """로그인 화면 WebDAV 모드: 임의 WebDAV 서버를 드라이브로 연결한다.
@@ -726,6 +781,26 @@ class App:
         """시작 시: 자동 로그인 → (설정 시) 드라이브 연결 → 동기화 트리거."""
         cfg = self.cfg
         pw = cfg.get_password()
+        if cfg.is_ftp_session():
+            # FTP 세션: FTP 로 자격 검증만 하고 드라이브를 연결한다 (API 기능 없음)
+            from .ftp_client import FtpDriveClient
+            try:
+                c = FtpDriveClient(cfg.ftp_host, cfg.ftp_port, cfg.username, pw)
+                c.spaces()
+                c.close()
+                self._pw = pw
+                self.root.after(0, self._show_settings)
+                self.set_status("자동 로그인 성공 (FTP)", SUCCESS)
+                self.log("자동 로그인 성공 (FTP)")
+            except Exception as e:  # noqa: BLE001
+                self.set_status("자동 로그인 실패", DANGER)
+                self.log(f"자동 로그인 실패 (FTP): {e}")
+                return
+            if cfg.auto_connect_drive:
+                self.log("FTP 접속에서는 WebDAV 드라이브 자동 연결이 지원되지 않습니다.")
+            if cfg.vfs_enabled:
+                self._start_drive_async()
+            return
         try:
             c = GenDiskClient(cfg.server_url)
             c.login(cfg.username, pw)
@@ -753,6 +828,8 @@ class App:
 
     def try_relogin(self):
         """세션 만료 시 저장된 정보로 조용히 재로그인."""
+        if self.cfg.is_ftp_session():
+            return                      # FTP 는 비밀번호 직접 인증 — 갱신할 세션이 없다
         pw = self.cfg.get_password() or self._pw
         if not (self.cfg.username and pw):
             return
@@ -830,6 +907,17 @@ class App:
         pw = self.cfg.get_password() or self._pw
         if not (self.cfg.server_url and self.cfg.username and pw):
             return False
+        if self.cfg.is_ftp_session():
+            # FTP 는 비밀번호 직접 인증 — 자격 증명이 유효한지 한 번 확인만 한다
+            from .ftp_client import FtpDriveClient
+            try:
+                c = FtpDriveClient(self.cfg.ftp_host, self.cfg.ftp_port,
+                                   self.cfg.username, pw)
+                c.spaces()
+                c.close()
+                return True
+            except Exception:
+                return False
         try:
             c = GenDiskClient(self.cfg.server_url)
             c.login(self.cfg.username, pw)
@@ -983,7 +1071,8 @@ class App:
     def _drive_reconnect(self):
         """genDISK Drive 를 완전히 내렸다 다시 연결한다(연결·목록 문제 수동 복구).
         탐색기 노드는 유지되고 provider 연결·폴링·실시간 이벤트만 새로 만든다."""
-        if not (self.cfg.server_url and self.cfg.token):
+        if not (self.cfg.server_url
+                and (self.cfg.token or self.cfg.is_ftp_session())):
             messagebox.showwarning("로그인 필요", "먼저 로그인하세요.")
             return
         self._set_drive_buttons(True, reconnect_text="연결 중…")
@@ -1010,7 +1099,8 @@ class App:
 
     def _toggle_vfs(self):
         if self.var_vfs.get():
-            if not (self.cfg.server_url and self.cfg.token):
+            if not (self.cfg.server_url
+                    and (self.cfg.token or self.cfg.is_ftp_session())):
                 messagebox.showwarning("로그인 필요", "먼저 로그인하세요.")
                 self.var_vfs.set(False)
                 return
@@ -1034,11 +1124,21 @@ class App:
 
     def _refresh_spaces_async(self):
         """저장된 토큰으로 시작했을 때 저장소 목록을 백그라운드에서 채운다(네트워크는 스레드에서)."""
-        if not (self.cfg.server_url and self.cfg.token):
+        if not self.cfg.server_url:
+            return
+        if not (self.cfg.token or (self.cfg.is_ftp_session() and self.cfg.get_password())):
             return
         def work():
             try:
-                spaces = [s["id"] for s in GenDiskClient(self.cfg.server_url, self.cfg.token).spaces()]
+                if self.cfg.is_ftp_session():
+                    from .ftp_client import FtpDriveClient
+                    c = FtpDriveClient(self.cfg.ftp_host, self.cfg.ftp_port,
+                                       self.cfg.username, self.cfg.get_password())
+                    spaces = [s["id"] for s in c.spaces()]
+                    c.close()
+                else:
+                    spaces = [s["id"] for s in
+                              GenDiskClient(self.cfg.server_url, self.cfg.token).spaces()]
             except Exception:
                 return
             def apply():
@@ -1112,6 +1212,11 @@ class App:
         pw = self._pw or self.cfg.get_password()
         if not self.cfg.server_url or not self.cfg.username or not pw:
             messagebox.showwarning("정보 필요", "로그인 후 다시 시도하세요 (비밀번호가 필요합니다).")
+            return
+        if self.cfg.is_ftp_session():
+            messagebox.showinfo(
+                "FTP 접속", "FTP 접속에서는 WebDAV 드라이브 연결을 지원하지 않습니다.\n"
+                            "탐색기 사이드바의 genDISK Drive 를 사용하세요.")
             return
         # 먼저 서버의 /dav 를 직접 확인 → 서버 문제와 로컬(WebClient) 문제를 구분
         try:

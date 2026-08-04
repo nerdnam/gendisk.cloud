@@ -93,6 +93,11 @@ class Config:
     def is_ready(self) -> bool:
         return bool(self.server_url and self.token and self.local_folder)
 
+    def is_ftp_session(self) -> bool:
+        """로그인 화면에서 FTP 주소로 접속한 세션 — HTTPS API 없이 FTP 만으로 동작.
+        (드라이브는 FTP 전송, 동기화·WebDAV 등 API 전용 기능은 비활성)"""
+        return self.server_url.startswith("ftp://")
+
     # ---------- 비밀번호 (DPAPI) ----------
     def set_password(self, password: str):
         enc = secret.encrypt(password) if password else None

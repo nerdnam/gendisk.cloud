@@ -251,7 +251,10 @@ class DriveController:
     def _sync_enabled(self) -> bool:
         """백그라운드 자동 반영(SSE+폴링) 사용 여부 — 사용자가 선택한다.
         꺼도 드라이브는 SMB처럼 동작한다(폴더를 열 때마다 서버 최신 목록).
-        업로드(드롭 파일 감지)는 드라이브의 기본 기능이라 항상 돈다."""
+        업로드(드롭 파일 감지)는 드라이브의 기본 기능이라 항상 돈다.
+        FTP 세션(API 토큰 없음)에서는 SSE/delta 를 쓸 수 없어 항상 꺼진다."""
+        if getattr(self.cfg, "is_ftp_session", None) and self.cfg.is_ftp_session():
+            return False
         return bool(getattr(self.cfg, "vfs_sync", True))
 
     def _free_space_enabled(self) -> bool:
