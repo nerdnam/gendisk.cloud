@@ -1022,7 +1022,15 @@ class Provider:
         return p.strip("\\").replace("\\", "/")
 
     def _build_placeholders(self, entries):
-        """서버 목록 → CF_PLACEHOLDER_CREATE_INFO 배열 + (호출 동안 살릴) keepalive."""
+        """서버 목록 → CF_PLACEHOLDER_CREATE_INFO 배열 + (호출 동안 살릴) keepalive.
+
+        주의: identity 길이 '오름차순'으로 정렬해 생성한다. cldflt(클라우드 필터)는 한
+        배치에서 긴 identity 뒤에 짧은 identity가 오면 그 placeholder 의 reparse 메타데이터를
+        깨뜨린다(열면 WinError 363 '메타데이터 손상', 삭제도 안 됨 — 재현 검증 완료).
+        균일하거나 오름차순이면 절대 발생하지 않으므로 정렬로 회피한다(생성 순서는 무해)."""
+        entries = sorted(entries, key=lambda e: len(json.dumps(
+            {"space": e.get("_space", self.space), "path": e["path"],
+             "dir": bool(e.get("is_dir"))}).encode("utf-8")))
         n = len(entries)
         arr = (C.CF_PLACEHOLDER_CREATE_INFO * n)()
         keep = []
