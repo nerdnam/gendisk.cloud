@@ -47,6 +47,14 @@ class Config:
     # 무저장(SMB식): 파일 데이터를 컴퓨터에 남기지 않는다 — 업로드한 드롭 파일은 즉시,
     # 열람한 파일은 잠시 후 온라인 전용으로 되돌린다('항상 이 장치에 유지' 고정은 예외).
     vfs_free_space: bool = True
+    # 드라이브 파일 전송 방식: "api"(HTTPS, 기본) / "ftp"(서버 내장 FTP — GENDISK_FTP_PORT).
+    # 실시간 반영(SSE)·delta 는 FTP 모드에서도 HTTPS API 를 계속 쓴다(하이브리드).
+    vfs_transport: str = "api"
+    # FTP 접속 정보. Cloudflare 는 FTP 를 프록시하지 않으므로 호스트는 원본 서버
+    # 주소(IP/DNS-only)여야 한다. 비우면 서버 주소의 호스트를 그대로 쓴다.
+    ftp_host: str = ""
+    ftp_port: int = 2121
+    ftp_tls: bool = False
     # 일반(범용) WebDAV 서버 연결 목록. 각 항목은 dict:
     #   {name, url, username, password_enc(DPAPI), drive, auto(bool)}
     # genDISK 서버 마운트와 별개로, 임의 WebDAV 서버(NAS/Nextcloud 등)를 드라이브로 연결.

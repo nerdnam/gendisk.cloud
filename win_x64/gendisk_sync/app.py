@@ -550,6 +550,27 @@ class App:
             c, "업로드한 파일은 즉시, 열어본 파일은 잠시 후 서버에만 남기고 로컬에서 비웁니다.\n"
                "탐색기에서 '항상 이 장치에 유지'로 고정한 파일은 남겨둡니다.").pack(
             fill="x", pady=(2, 0))
+        # FTP 전송: 파일 목록·전송을 서버 내장 FTP 로 보낸다 (실시간 반영은 API 유지).
+        self.var_ftp = tk.BooleanVar(value=getattr(self.cfg, "vfs_transport", "api") == "ftp")
+        ctk.CTkSwitch(c, text="FTP 전송 사용 (서버 내장 FTP 로 파일 전송)",
+                      variable=self.var_ftp,
+                      command=self._toggle_ftp_transport).pack(anchor="w", pady=(8, 0))
+        frow = ctk.CTkFrame(c, fg_color="transparent")
+        frow.pack(fill="x", pady=(4, 0))
+        self._field_label(frow, "FTP 호스트").pack(side="left")
+        self.e_ftp_host = ctk.CTkEntry(frow, width=180,
+                                       placeholder_text="서버 IP (예: 192.168.1.241)")
+        if getattr(self.cfg, "ftp_host", ""):
+            self.e_ftp_host.insert(0, self.cfg.ftp_host)
+        self.e_ftp_host.pack(side="left", padx=(8, 0))
+        self._field_label(frow, "포트").pack(side="left", padx=(10, 0))
+        self.e_ftp_port = ctk.CTkEntry(frow, width=64)
+        self.e_ftp_port.insert(0, str(getattr(self.cfg, "ftp_port", 2121)))
+        self.e_ftp_port.pack(side="left", padx=(8, 0))
+        self._field_label(
+            c, "Cloudflare 는 FTP 를 중계하지 않으므로 호스트는 서버의 실제 주소여야\n"
+               "합니다 (같은 네트워크/VPN 의 IP). 저장된 로그인 정보로 접속합니다.").pack(
+            fill="x", pady=(2, 0))
         vrow = ctk.CTkFrame(c, fg_color="transparent")
         vrow.pack(fill="x", pady=(8, 0))
         self.btn_drive_refresh = ctk.CTkButton(
@@ -922,6 +943,43 @@ class App:
                 self._set_drive_buttons(False)
         threading.Thread(target=work, daemon=True).start()
 
+    def _toggle_ftp_transport(self):
+        """드라이브 파일 전송을 API(HTTPS) ↔ FTP 로 전환 — 저장하고, 켜져 있으면 재연결."""
+        self.cfg.vfs_transport = "ftp" if self.var_ftp.get() else "api"
+        self.cfg.ftp_host = self.e_ftp_host.get().strip()
+        try:
+            self.cfg.ftp_port = int(self.e_ftp_port.get().strip() or 2121)
+        except ValueError:
+            self.cfg.ftp_port = 2121
+        if self.cfg.vfs_transport == "ftp" and not (self._pw or self.cfg.get_password()):
+            self.var_ftp.set(False)
+            self.cfg.vfs_transport = "api"
+            messagebox.showwarning(
+                "로그인 정보 필요",
+                "FTP 전송은 저장된 로그인 정보(비밀번호)로 접속합니다.\n"
+                "로그인 화면에서 '로그인 정보 저장'을 켜고 다시 로그인하세요.")
+            return
+        self.cfg.save()
+        mode = "FTP" if self.cfg.vfs_transport == "ftp" else "API(HTTPS)"
+        if not self.drive.running:
+            self.log(f"드라이브 전송 설정 저장: {mode} (다음 연결부터 적용)")
+            return
+        self._set_drive_buttons(True, reconnect_text="적용 중…")
+
+        def work():
+            try:
+                self.drive.restart()
+                self.log(f"드라이브 전송 방식 적용: {mode}")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"전송 설정 적용 실패: {e}")
+                self.set_status("genDISK Drive 연결 실패", DANGER)
+                self.cfg.vfs_enabled = False
+                self.cfg.save()
+                self.root.after(0, lambda: self.var_vfs.set(False))
+            finally:
+                self._set_drive_buttons(False)
+        threading.Thread(target=work, daemon=True).start()
+
     def _drive_reconnect(self):
         """genDISK Drive 를 완전히 내렸다 다시 연결한다(연결·목록 문제 수동 복구).
         탐색기 노드는 유지되고 provider 연결·폴링·실시간 이벤트만 새로 만든다."""
@@ -1018,6 +1076,12 @@ class App:
         except ValueError:
             self.cfg.interval_sec = 30
         self.cfg.enabled = self.var_enabled.get()
+        self.cfg.vfs_transport = "ftp" if self.var_ftp.get() else "api"
+        self.cfg.ftp_host = self.e_ftp_host.get().strip()
+        try:
+            self.cfg.ftp_port = int(self.e_ftp_port.get().strip() or 2121)
+        except ValueError:
+            self.cfg.ftp_port = 2121
         self.cfg.save_credentials = self.var_savecred.get()
         self.cfg.auto_start = self.var_autostart.get()
         self.cfg.auto_login = self.var_autologin.get()

@@ -12,6 +12,7 @@ import time
 
 from . import navdrive, vfs
 from .client import ApiError, AuthError, GenDiskClient
+from .ftp_client import FtpDriveClient
 from .icon import icon_path
 
 
@@ -112,6 +113,7 @@ class DriveController:
         self._events_stream = None      # 열려 있는 EventStream (종료 시 close 로 읽기 깨우기)
         self._cached_client = None      # keep-alive 연결을 살리려 클라이언트를 재사용
         self._cached_fast_client = None  # 목록 조회 전용(짧은 타임아웃) 클라이언트
+        self._cached_ftp = None          # FTP 전송 클라이언트 (vfs_transport="ftp" 일 때)
         self._delta_lock = threading.Lock()  # 폴링·수동 새로고침의 delta 패스 직렬화
         self._delta_cursors = self._load_cursors()   # space id -> delta 커서(서버 시각 ns)
         self._delta_supported = None    # None=미확인(첫 패스에서 /info features 로 판별)
@@ -134,7 +136,7 @@ class DriveController:
         return _log
 
     def _list_spaces(self):
-        return self._with_reauth(lambda c: c.spaces(), fast=True)
+        return self._with_reauth(lambda c: c.spaces(), fast=True, io=True)
 
     # --- 서버 호출 (세션 만료 시 1회 재로그인 후 재시도) ---
     def _client(self):
@@ -161,7 +163,44 @@ class DriveController:
             c.token = self.cfg.token
         return c
 
-    def _with_reauth(self, fn, fast=False):
+    def _ftp_enabled(self) -> bool:
+        return getattr(self.cfg, "vfs_transport", "api") == "ftp"
+
+    def _ftp_client(self):
+        """FTP 전송 클라이언트(연결 풀 포함)를 만들거나 재사용한다.
+        호스트를 비우면 서버 주소의 호스트를 쓴다(원본 직결이 아닌 Cloudflare 경유면
+        연결이 안 되므로, 그 경우 사용자에게 ftp_host 설정을 안내)."""
+        import urllib.parse
+        host = (getattr(self.cfg, "ftp_host", "") or
+                urllib.parse.urlsplit(self.cfg.server_url).hostname or "")
+        port = int(getattr(self.cfg, "ftp_port", 2121) or 2121)
+        tls = bool(getattr(self.cfg, "ftp_tls", False))
+        pw = self.cfg.get_password()
+        if not pw:
+            raise AuthError("FTP 전송에는 저장된 로그인 정보가 필요합니다 "
+                            "(로그인 화면에서 '로그인 정보 저장'을 켜세요)")
+        c = self._cached_ftp
+        if (c is None or c.host != host or c.port != port
+                or c.username != self.cfg.username or c.tls != tls):
+            if c is not None:
+                c.close()
+            c = FtpDriveClient(host, port, self.cfg.username, pw, tls=tls)
+            self._cached_ftp = c
+        else:
+            c.password = pw
+        return c
+
+    def _with_reauth(self, fn, fast=False, io=False):
+        """io=True 인 파일 입출력 호출은 전송 설정(vfs_transport)에 따라 FTP 로 보낸다.
+        실시간 이벤트·delta 등 나머지는 항상 HTTPS API 클라이언트를 쓴다."""
+        if io and self._ftp_enabled():
+            try:
+                return fn(self._ftp_client())
+            except AuthError:
+                # 비밀번호가 바뀌었을 수 있음 — 재로그인(성공 시 저장 갱신) 후 1회 재시도
+                if self.on_reauth and self.on_reauth():
+                    return fn(self._ftp_client())
+                raise
         get = self._client_fast if fast else self._client
         try:
             return fn(get())
@@ -171,11 +210,12 @@ class DriveController:
             raise
 
     def _list_dir(self, space, rel):
-        return self._with_reauth(lambda c: c.list_dir(space, rel), fast=True)
+        return self._with_reauth(lambda c: c.list_dir(space, rel), fast=True, io=True)
 
     def _fetch_range(self, meta, offset, length):
         return self._with_reauth(
-            lambda c: c.download_range(meta["space"], meta["path"], offset, length))
+            lambda c: c.download_range(meta["space"], meta["path"], offset, length),
+            io=True)
 
     def _upload_file(self, space, path, local_path):
         # 로컬→원격: 큰 파일은 put_smart 가 자동으로 청크 업로드로 전환한다.
@@ -185,22 +225,23 @@ class DriveController:
             if self._progress:
                 self._progress(local_path, name, "up", done, total)
         try:
-            self._with_reauth(lambda c: c.put_smart(space, path, local_path, progress=prog))
+            self._with_reauth(lambda c: c.put_smart(space, path, local_path, progress=prog),
+                              io=True)
         finally:
             if self._progress:
                 self._progress(local_path, name, "up", None, None)   # 완료/종료 표식
 
     def _delete_file(self, space, path):
         # 로컬 삭제 → 서버 삭제. 이미 없으면(404) 서버가 알아서 처리.
-        self._with_reauth(lambda c: c.delete(space, path))
+        self._with_reauth(lambda c: c.delete(space, path), io=True)
 
     def _rename_file(self, space, src, dst, src_space=None, dst_space=None):
         # 로컬 이름변경/이동 → 서버 이동(move). 저장소 간이면 src_space/dst_space 지정.
-        self._with_reauth(lambda c: c.move(space, src, dst, src_space, dst_space))
+        self._with_reauth(lambda c: c.move(space, src, dst, src_space, dst_space), io=True)
 
     def _mkdir_dir(self, space, path):
         # 로컬 새 폴더 → 서버 mkdir.
-        self._with_reauth(lambda c: c.mkdir(space, path))
+        self._with_reauth(lambda c: c.mkdir(space, path), io=True)
 
     # --- 원격 변경 반영 (폰/웹 업로드가 드라이브에 나타나게) ---
     # deep refresh(열었던 폴더 전부 대조 — 폴더당 목록 요청 1회)는 몇 사이클에 한 번만.
@@ -552,4 +593,10 @@ class DriveController:
                     vfs.C.CfUnregisterSyncRoot(self.cfg.vfs_root_path())
                 except Exception:
                     pass
+            if self._cached_ftp is not None:     # FTP 연결 풀 정리
+                try:
+                    self._cached_ftp.close()
+                except Exception:
+                    pass
+                self._cached_ftp = None
             self.log("[drive] genDISK Drive 해제됨")
