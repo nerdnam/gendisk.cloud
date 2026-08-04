@@ -76,11 +76,10 @@ Windows/Android은 [클라이언트 앱](#클라이언트-앱-데스크톱모바
 웹 UI 외에 네이티브 클라이언트로도 접속할 수 있습니다. 어느 클라이언트든 서버의 저장소 접근 권한·읽기 전용·용량 제한 규칙을 그대로 따릅니다.
 
 ### Windows — [win_x64/](win_x64/README.md)
-- **genDISK Drive** — iCloud처럼 **탐색기 사이드바에 온디맨드 드라이브**로 나타납니다. 목록만 먼저 보이고, 파일을 열 때 자동으로 내려받습니다 (Windows Cloud Files API).
-  파일 전송을 HTTPS API 대신 **서버 내장 FTP로 보내는 옵션**도 있습니다 ([FTP 접속](#ftp-접속))
-- **WebDAV 드라이브 연결** — genDISK를 네트워크 드라이브로 마운트
+- **genDISK 접속은 높은 호환성을 위해 FTP 프로토콜을 사용합니다** — 로그인 화면에 서버의 FTP 주소(예: `ftp.example.com:2121`)를 입력하면 됩니다 ([FTP 접속](#ftp-접속))
+- **genDISK Drive** — iCloud처럼 **탐색기 사이드바에 온디맨드 드라이브**로 나타납니다. 목록만 먼저 보이고, 파일을 열 때 자동으로 내려받습니다 (Windows Cloud Files API + FTP 전송)
 - **일반 WebDAV 클라이언트** — NAS·Nextcloud 등 **임의의 WebDAV 서버**를 드라이브로 연결·관리 (여러 접속 프로파일 저장/전환)
-- 폴더 동기화(`/api/sync`), 시작 시 자동 실행, 시스템 트레이 상주. 서명 없이 단일 exe로 동작하며 main push마다 CI가 빌드합니다.
+- 시작 시 자동 실행·자동 로그인, 시스템 트레이 상주. 서명 없이 단일 exe로 동작하며 main push마다 CI가 빌드합니다.
 
 ### Android
 - 파일 탐색·업로드·**폴더 업로드**, 사진/동영상 미리보기, **QR 로그인**
@@ -317,7 +316,7 @@ compose.yaml 수정 후 `docker compose up -d`로 다시 올리면 반영됩니�
 
 ### 서버에서 켜기
 
-기본은 꺼져 있습니다. compose에 환경변수와 포트를 추가하면 켜집니다:
+`GENDISK_FTP_PORT` 환경변수를 설정해야 켜집니다. **Windows 클라이언트의 genDISK 접속이 FTP를 사용하므로**, 이 저장소의 [compose.yaml](compose.yaml) 예시에는 기본으로 포함되어 있습니다:
 
 ```yaml
     ports:
@@ -327,21 +326,20 @@ compose.yaml 수정 후 `docker compose up -d`로 다시 올리면 반영됩니�
     environment:
       - GENDISK_FTP_PORT=2121
       - GENDISK_FTP_PASSIVE_PORTS=60000-60019
-      - GENDISK_FTP_MASQUERADE=서버의_외부_IP    # NAT/도커 뒤에서는 필수
 ```
 
 | 환경변수 | 설명 |
 |----------|------|
 | `GENDISK_FTP_PORT` | 설정해야 FTP가 켜집니다 (예: 2121) |
 | `GENDISK_FTP_PASSIVE_PORTS` | 패시브 데이터 포트 범위 (기본 `60000-60019`) — 방화벽/포트포워딩에 **반드시 함께** 열어야 합니다 |
-| `GENDISK_FTP_MASQUERADE` | 패시브 응답에 실을 외부 IP. 도커 브리지/NAT 뒤에서는 컨테이너 내부 IP가 광고되므로 **꼭 지정**하세요 (LAN이면 호스트 LAN IP, 인터넷 공개면 공인 IP) |
+| `GENDISK_FTP_MASQUERADE` | 패시브 응답에 실을 외부 IP. 도커/NAT 뒤에서는 컨테이너 내부 IP가 광고되지만, 대부분의 클라이언트(genDISK 앱·FileZilla 등)는 이를 무시하고 접속 주소를 재사용하므로 없어도 동작합니다. 엄격한 클라이언트까지 지원하려면 지정하세요 (LAN이면 호스트 LAN IP, 인터넷 공개면 공인 IP) |
 | `GENDISK_FTP_TLS_CERT` / `GENDISK_FTP_TLS_KEY` | 인증서·키 경로를 주면 **FTPS**(explicit TLS)로 동작 |
 
 ### 접속
 
 - **FileZilla/WinSCP** — 호스트 `서버주소`, 포트 `2121`, 사용자/비밀번호는 genDISK 계정
 - **Windows 탐색기** — 주소창에 `ftp://서버주소:2121` (평문 FTP만 지원)
-- **Windows 클라이언트 앱** — 설정의 **"FTP 전송 사용"**을 켜면 genDISK Drive(탐색기 사이드바)의 파일 전송이 FTP로 동작합니다 (실시간 반영은 HTTPS API 유지)
+- **Windows 클라이언트 앱** — 로그인 화면에 FTP 주소(`서버주소:2121`)를 입력하면 genDISK Drive(탐색기 사이드바)가 FTP로 동작합니다. 포트를 생략하면 2121 → 21 순서로 자동 시도합니다
 
 > ⚠️ **Cloudflare는 FTP를 프록시하지 않습니다.** 접속 주소는 프록시 도메인이 아니라 **서버의 실제 주소**(LAN IP, VPN 주소, 또는 DNS-only 레코드)여야 합니다.
 >

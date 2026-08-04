@@ -7,12 +7,12 @@ services:
     container_name: gendisk
     ports:
       - "8000:8000"
-      # ── FTP 서버 (선택) ─────────────────────────────────────────
-      # 아래 environment 의 GENDISK_FTP_PORT 를 설정하면 켜집니다.
+      # ── FTP 서버 ────────────────────────────────────────────────
+      # Windows 클라이언트의 genDISK 접속이 FTP 를 사용하므로 기본 켬.
       # Cloudflare 는 FTP 를 프록시하지 않으므로 이 포트들은 서버 IP 로
-      # 직접 접속해야 합니다 (포트포워딩 또는 VPN).
-      # - "2121:2121"                  # FTP 제어 포트
-      # - "60000-60019:60000-60019"    # 패시브 데이터 포트 범위
+      # 직접 접속해야 합니다 (포트포워딩 또는 VPN — 제어+패시브 모두!).
+      - "2121:2121"                  # FTP 제어 포트
+      - "60000-60019:60000-60019"    # 패시브 데이터 포트 범위
     volumes:
       # 계정 DB·업로드 파일·썸네일이 모두 여기 저장됩니다 (컨테이너를 지워도 유지)
       - /mnt/Data0/ncloud/data:/app/data
@@ -23,15 +23,20 @@ services:
       # 예시 (원하는 대로 수정/추가):
       # - /mnt/Data0/Media:/app/mounts/media
       # - /mnt/Data0/Backup:/app/mounts/backup:ro
-    # environment:
-      # ── FTP 서버 (선택) ──────────────────────────────────────────
+    environment:
+      # ── FTP 서버 ─────────────────────────────────────────────────
+      # Windows 클라이언트(genDISK Drive)가 이 FTP 로 접속합니다.
       # 웹/WebDAV 와 같은 계정으로 로그인하며, 루트에 home + 접근 가능한
-      # 마운트가 폴더로 보입니다. 평문 FTP 는 비밀번호가 노출되므로
-      # 인터넷에 열 때는 TLS(FTPS) 설정을 권장합니다.
-      # - GENDISK_FTP_PORT=2121
-      # - GENDISK_FTP_PASSIVE_PORTS=60000-60019
-      # - GENDISK_FTP_MASQUERADE=서버의_외부_IP_또는_호스트명   # NAT 뒤일 때
-      # - GENDISK_FTP_TLS_CERT=/app/data/ftp-cert.pem          # FTPS(선택)
+      # 마운트가 폴더로 보입니다.
+      - GENDISK_FTP_PORT=2121
+      - GENDISK_FTP_PASSIVE_PORTS=60000-60019
+      # 패시브 응답에 실을 외부 IP. 도커 뒤에서는 컨테이너 내부 IP 가 광고되는데,
+      # 대부분의 클라이언트(genDISK 앱·FileZilla 등)는 이를 무시하고 접속 주소를
+      # 재사용하므로 없어도 동작합니다. 엄격한 클라이언트까지 지원하려면 설정하세요
+      # (LAN 이면 호스트 LAN IP, 인터넷 공개면 공인 IP):
+      # - GENDISK_FTP_MASQUERADE=서버의_외부_IP
+      # 평문 FTP 는 비밀번호가 노출됩니다 — 인터넷에 열 때는 FTPS 권장:
+      # - GENDISK_FTP_TLS_CERT=/app/data/ftp-cert.pem
       # - GENDISK_FTP_TLS_KEY=/app/data/ftp-key.pem
       # ── Homepage 대시보드 위젯 (Nextcloud 위젯 호환) ──────────────
       # 아래 토큰을 설정하면 Homepage 의 nextcloud 위젯에서 이 서버를 띄울 수 있습니다.
