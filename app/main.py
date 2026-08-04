@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import admin, auth, files, serverinfo, shares, sync
+from . import admin, auth, files, ftp, serverinfo, shares, sync
 from .database import init_db
 from .webdav import DAV_METHODS, webdav_endpoint
 
@@ -17,6 +17,7 @@ WIN_CLIENT = "gendisk-sync.exe"
 
 app = FastAPI(title="genDISK", version="0.1.0")
 init_db()
+ftp.maybe_start()   # GENDISK_FTP_PORT 설정 시에만 FTP(S) 서버 스레드 시작
 
 app.include_router(auth.router)
 app.include_router(files.router)

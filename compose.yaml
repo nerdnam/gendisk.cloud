@@ -7,6 +7,12 @@ services:
     container_name: gendisk
     ports:
       - "8000:8000"
+      # ── FTP 서버 (선택) ─────────────────────────────────────────
+      # 아래 environment 의 GENDISK_FTP_PORT 를 설정하면 켜집니다.
+      # Cloudflare 는 FTP 를 프록시하지 않으므로 이 포트들은 서버 IP 로
+      # 직접 접속해야 합니다 (포트포워딩 또는 VPN).
+      # - "2121:2121"                  # FTP 제어 포트
+      # - "60000-60019:60000-60019"    # 패시브 데이터 포트 범위
     volumes:
       # 계정 DB·업로드 파일·썸네일이 모두 여기 저장됩니다 (컨테이너를 지워도 유지)
       - /mnt/Data0/ncloud/data:/app/data
@@ -18,6 +24,15 @@ services:
       # - /mnt/Data0/Media:/app/mounts/media
       # - /mnt/Data0/Backup:/app/mounts/backup:ro
     # environment:
+      # ── FTP 서버 (선택) ──────────────────────────────────────────
+      # 웹/WebDAV 와 같은 계정으로 로그인하며, 루트에 home + 접근 가능한
+      # 마운트가 폴더로 보입니다. 평문 FTP 는 비밀번호가 노출되므로
+      # 인터넷에 열 때는 TLS(FTPS) 설정을 권장합니다.
+      # - GENDISK_FTP_PORT=2121
+      # - GENDISK_FTP_PASSIVE_PORTS=60000-60019
+      # - GENDISK_FTP_MASQUERADE=서버의_외부_IP_또는_호스트명   # NAT 뒤일 때
+      # - GENDISK_FTP_TLS_CERT=/app/data/ftp-cert.pem          # FTPS(선택)
+      # - GENDISK_FTP_TLS_KEY=/app/data/ftp-key.pem
       # ── Homepage 대시보드 위젯 (Nextcloud 위젯 호환) ──────────────
       # 아래 토큰을 설정하면 Homepage 의 nextcloud 위젯에서 이 서버를 띄울 수 있습니다.
       # Homepage 위젯의 key 에 같은 값을 넣으세요. (미설정 시 관리자 아이디/비번으로도 가능)

@@ -3,3 +3,5 @@ uvicorn[standard]>=0.32
 python-multipart>=0.0.12
 pillow>=11.0
 qrcode>=8.0
+pyftpdlib>=1.5          # FTP 서버 (GENDISK_FTP_PORT 설정 시)
+pyopenssl>=24.0         # FTPS(TLS) 지원 — GENDISK_FTP_TLS_CERT/KEY 설정 시 필요
