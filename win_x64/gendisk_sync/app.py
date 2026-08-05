@@ -1034,10 +1034,29 @@ class App:
             try:
                 msg = ftp_drive.requirements_message()
                 if msg:
-                    self.log("FTP 드라이브 연결 불가 —\n" + msg)
-                    self.root.after(0, lambda: messagebox.showwarning(
-                        "구성 요소 필요", msg))
-                    return
+                    # 안내만 하지 않고 '지금 설치'를 제안한다 (winget, UAC 1회).
+                    self.log("genDISK Drive 구성 요소 없음 —\n" + msg)
+                    done = threading.Event()
+                    choice = {"install": False}
+
+                    def ask():
+                        choice["install"] = messagebox.askyesno(
+                            "구성 요소 설치",
+                            msg + "\n\n지금 설치할까요?\n"
+                                  "(관리자 권한 승인이 한 번 필요합니다)")
+                        done.set()
+                    self.root.after(0, ask)
+                    done.wait(300)
+                    if not choice["install"]:
+                        self.log("구성 요소 설치를 건너뛰었습니다.")
+                        return
+                    self.set_status("구성 요소 설치 중…", MUTED)
+                    err = ftp_drive.install_requirements(log=self.log)
+                    if err:
+                        self.set_status("구성 요소 설치 실패", DANGER)
+                        self.log(err)
+                        self.root.after(0, lambda: messagebox.showerror("설치 실패", err))
+                        return
                 ftp_drive.configure(cfg.ftp_host, cfg.ftp_port, cfg.username, pw,
                                     tls=bool(getattr(cfg, "ftp_tls", False)))
                 ftp_drive.mount(point)

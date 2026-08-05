@@ -47,17 +47,70 @@ def winfsp_installed() -> bool:
     return False
 
 
+#: 자동 설치 대상 — (표시 이름, winget 패키지 ID, 설치 확인 함수)
+REQUIREMENTS = (
+    ("WinFsp", "WinFsp.WinFsp", lambda: winfsp_installed()),
+    ("rclone", "Rclone.Rclone", lambda: bool(rclone_path())),
+)
+
+
+def missing_requirements() -> list[tuple[str, str]]:
+    """설치되지 않은 구성 요소 [(이름, winget ID)]."""
+    return [(name, pkg) for name, pkg, ok in REQUIREMENTS if not ok()]
+
+
 def requirements_message() -> str | None:
     """빠진 구성 요소가 있으면 안내 문구, 다 있으면 None."""
-    missing = []
-    if not winfsp_installed():
-        missing.append("WinFsp (winget install WinFsp.WinFsp)")
-    if not rclone_path():
-        missing.append("rclone (winget install Rclone.Rclone)")
+    missing = missing_requirements()
     if not missing:
         return None
-    return ("FTP 드라이브 연결에 다음이 필요합니다:\n · " + "\n · ".join(missing) +
-            "\n\n설치 후 다시 시도하세요.")
+    return ("genDISK Drive 연결에 다음이 필요합니다:\n · " +
+            "\n · ".join(f"{n} ({pkg})" for n, pkg in missing))
+
+
+def winget_available() -> bool:
+    from shutil import which
+    return bool(which("winget"))
+
+
+def install_requirements(log=None) -> str | None:
+    """빠진 구성 요소를 winget 으로 설치한다(관리자 권한 승격 1회).
+    성공하면 None, 실패하면 사람이 읽을 오류 문구를 돌려준다."""
+    import ctypes
+
+    missing = missing_requirements()
+    if not missing:
+        return None
+    if not winget_available():
+        return ("winget(앱 설치 관리자)을 찾을 수 없습니다.\n"
+                "Microsoft Store 에서 '앱 설치 관리자'를 설치하거나,\n"
+                "다음 주소에서 직접 받아 설치하세요:\n"
+                " · WinFsp: https://winfsp.dev\n · rclone: https://rclone.org/downloads/")
+
+    # 한 번의 UAC 승인으로 필요한 것을 모두 설치한다.
+    cmds = "; ".join(
+        f"winget install --id {pkg} -e --accept-source-agreements "
+        f"--accept-package-agreements" for _n, pkg in missing)
+    if log:
+        log(f"구성 요소 설치 시작: {', '.join(n for n, _ in missing)}")
+    rc = ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", "powershell.exe",
+        f'-NoProfile -ExecutionPolicy Bypass -Command "{cmds}"', None, 0)
+    if rc <= 32:                       # 32 이하 = 실행 실패(취소 포함)
+        return ("설치를 시작하지 못했습니다(관리자 권한 승인이 취소되었을 수 있습니다).\n"
+                "다음 명령을 직접 실행해도 됩니다:\n" +
+                "\n".join(f" winget install --id {pkg} -e" for _n, pkg in missing))
+
+    # 설치 완료를 기다린다(최대 5분) — 설치 후 PATH 갱신 전이라 경로 탐색으로 확인.
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        if not missing_requirements():
+            if log:
+                log("구성 요소 설치 완료")
+            return None
+        time.sleep(2.0)
+    still = ", ".join(n for n, _ in missing_requirements())
+    return f"설치가 확인되지 않았습니다 ({still}). 설치 창을 확인한 뒤 다시 시도하세요."
 
 
 def configure(host: str, port: int, username: str, password: str, tls: bool = False):
