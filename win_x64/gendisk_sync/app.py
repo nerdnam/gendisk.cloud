@@ -552,6 +552,23 @@ class App:
         self.seg_theme.set(_THEME_LABELS.get(self.cfg.appearance, "자동"))
         self.seg_theme.pack(fill="x")
 
+        # ── FTP 드라이브 (rclone + WinFsp) — 로컬 저장 없음 ──
+        c = self._card(right, "genDISK 드라이브 (FTP 직결)")
+        self._field_label(
+            c, "서버를 드라이브 문자로 연결합니다. 탐색기가 서버를 직접 읽고 쓰며\n"
+               "컴퓨터에 목록·파일을 저장하지 않습니다 (WinFsp·rclone 필요).").pack(fill="x")
+        self.var_ftp_drive = tk.BooleanVar(value=getattr(self.cfg, "ftp_drive_enabled", True))
+        ctk.CTkSwitch(c, text="FTP 드라이브 연결", variable=self.var_ftp_drive,
+                      command=self._toggle_ftp_drive).pack(anchor="w", pady=(8, 0))
+        drow = ctk.CTkFrame(c, fg_color="transparent")
+        drow.pack(fill="x", pady=(4, 0))
+        self._field_label(drow, "드라이브 문자").pack(side="left")
+        self.cmb_ftp_drive = ctk.CTkOptionMenu(
+            drow, width=90, values=[f"{ch}:" for ch in "GHIJKLMNOPQRSTUVWXYZ"],
+            command=lambda _v: self._toggle_ftp_drive())
+        self.cmb_ftp_drive.set(getattr(self.cfg, "ftp_drive_letter", "G:") or "G:")
+        self.cmb_ftp_drive.pack(side="left", padx=(10, 0))
+
         # ── genDISK Drive (온디맨드 클라우드) ──
         c = self._card(right, "genDISK Drive (온디맨드)")
         self._field_label(
@@ -711,8 +728,9 @@ class App:
                 self.e_ftp_host.delete(0, "end"); self.e_ftp_host.insert(0, host)
                 self.e_ftp_port.delete(0, "end"); self.e_ftp_port.insert(0, str(port))
                 self._show_settings()
-                self.log(f"FTP 로그인 성공 ({host}:{port}) — 드라이브 전송: FTP\n"
-                         "  (FTP 접속에서는 폴더 동기화·WebDAV 드라이브 등 API 기능이 쉽니다)")
+                self.log(f"FTP 로그인 성공 ({host}:{port})")
+                if cfg.ftp_drive_enabled:
+                    self._mount_ftp_drive_async()
                 if cfg.vfs_enabled:
                     if self.drive.running:
                         # 이미 떠 있는 드라이브는 옛 연결(이전 서버/전송)을 물고 있다
@@ -835,8 +853,8 @@ class App:
                 self.set_status("자동 로그인 실패", DANGER)
                 self.log(f"자동 로그인 실패 (FTP): {e}")
                 return
-            if cfg.auto_connect_drive:
-                self.log("FTP 접속에서는 WebDAV 드라이브 자동 연결이 지원되지 않습니다.")
+            if cfg.ftp_drive_enabled:
+                self._mount_ftp_drive_async()
             if cfg.vfs_enabled:
                 self._start_drive_async()
             return
@@ -1069,6 +1087,54 @@ class App:
             finally:
                 self._set_drive_buttons(False)
         threading.Thread(target=work, daemon=True).start()
+
+    # ---------- FTP 드라이브 (rclone + WinFsp) ----------
+    def _mount_ftp_drive_async(self):
+        """서버 FTP 를 드라이브 문자로 마운트 — 탐색기가 서버를 직접 본다.
+        로컬에 목록·파일을 저장하지 않으므로 온디맨드 방식의 문제가 없다."""
+        cfg = self.cfg
+        pw = self._pw or cfg.get_password()
+        if not (cfg.ftp_host and cfg.username and pw):
+            self.log("FTP 드라이브: 로그인 정보가 없어 건너뜁니다.")
+            return
+
+        def work():
+            from . import ftp_drive
+            drive = cfg.ftp_drive_letter or "G:"
+            try:
+                msg = ftp_drive.requirements_message()
+                if msg:
+                    self.log("FTP 드라이브 연결 불가 —\n" + msg)
+                    self.root.after(0, lambda: messagebox.showwarning(
+                        "구성 요소 필요", msg))
+                    return
+                ftp_drive.configure(cfg.ftp_host, cfg.ftp_port, cfg.username, pw,
+                                    tls=bool(getattr(cfg, "ftp_tls", False)))
+                ftp_drive.mount(drive)
+                self.set_status(f"{drive} 드라이브 연결됨 (FTP)", SUCCESS)
+                self.log(f"{drive} 드라이브를 연결했습니다 — 탐색기에서 확인하세요.")
+            except Exception as e:  # noqa: BLE001
+                self.set_status("FTP 드라이브 연결 실패", DANGER)
+                self.log(f"FTP 드라이브 연결 실패: {e}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _unmount_ftp_drive(self):
+        from . import ftp_drive
+        drive = self.cfg.ftp_drive_letter or "G:"
+        try:
+            if ftp_drive.unmount(drive):
+                self.log(f"{drive} 드라이브 연결을 해제했습니다.")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"FTP 드라이브 해제 실패: {e}")
+
+    def _toggle_ftp_drive(self):
+        self.cfg.ftp_drive_enabled = self.var_ftp_drive.get()
+        self.cfg.ftp_drive_letter = self.cmb_ftp_drive.get() or "G:"
+        self.cfg.save()
+        if self.cfg.ftp_drive_enabled:
+            self._mount_ftp_drive_async()
+        else:
+            threading.Thread(target=self._unmount_ftp_drive, daemon=True).start()
 
     def _toggle_ftp_transport(self):
         """드라이브 파일 전송을 API(HTTPS) ↔ FTP 로 전환 — 저장하고, 켜져 있으면 재연결."""

@@ -1135,7 +1135,12 @@ class Provider:
             # CPU 를 태우고 앱이 네이티브에서 죽었다). 짧은 시간에 반복이 과하면
             # 이번 응답만 '채움 완료'로 표시해 루프를 끊고, 잠시 뒤 다시 온디맨드로
             # 되돌려 신선도를 회복한다.
-            storm = self._storm_check(rel, now)
+            # 안전장치: '채움 완료' 표시는 폴더 내용이 실제로 완전할 때만 해야 한다.
+            # 아직 만들 항목이 남았거나(fresh) 로컬 개수가 서버보다 적으면 표시하지
+            # 않는다 — 표시해 버리면 Windows 가 다시 묻지 않아 목록이 불완전한 채로
+            # 굳는다(실제로 askforme 가 8개 중 1개만 보이는 문제가 났다).
+            complete = not fresh and len(existing) >= len(entries)
+            storm = complete and self._storm_check(rel, now)
             self.log(f"[vfs] FETCH_PLACEHOLDERS dir='{rel}' -> "
                      f"{len(entries)} entries (+{len(fresh)} new)"
                      + (" [cache]" if from_cache else "")
