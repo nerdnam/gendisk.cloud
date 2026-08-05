@@ -83,6 +83,9 @@ class Provider:
         # SMB식 열람 버스트 흡수: 탐색기는 폴더 하나를 열 때 여러 번 열거한다(정렬·새로고침·
         # 썸네일 등). 짧은 TTL 캐시로 그 버스트를 서버 왕복 1회로 줄인다(신선도 손실 ~2.5초).
         self._enum_cache = {}               # rel -> (만료 monotonic, entries)
+        self._storm_lock = threading.Lock()  # 재열거 폭주 감지 상태 보호
+        self._storm_hits = {}               # rel -> [최근 열거 시각들]
+        self._storm_until = {}              # rel -> 브레이크 유지 만료 시각
         self._hydrate_pool = None           # 병렬 다운로드 워커 풀(지연 생성)
         self._upload_seen = {}              # frel -> (size, mtime_ns): 안정성 대기 추적
         self._upload_done = {}              # frel -> (size, mtime_ns): 이미 업로드한 버전(재업로드 방지)
@@ -286,6 +289,46 @@ class Provider:
                 n += 1
         if n:
             self.log(f"[vfs] unfroze {n} dir(s) for always-fresh (SMB) listings")
+
+    # 폭주 판정: WINDOW 초 안에 같은 폴더가 LIMIT 회를 넘게 열거되면 루프로 본다.
+    STORM_WINDOW = 2.0
+    STORM_LIMIT = 12
+    STORM_COOLDOWN = 5.0        # 이 시간 뒤 다시 온디맨드(신선도)로 되돌린다
+
+    def _storm_check(self, rel: str, now: float) -> bool:
+        """이 폴더가 재열거 루프에 빠졌는지 판정하고, 그렇다면 True.
+        True 를 돌려준 뒤에는 COOLDOWN 후 population 을 다시 켜는 타이머를 건다."""
+        with self._storm_lock:
+            # 브레이크는 쿨다운 동안 '유지'되어야 한다. 한 번만 채움완료로 답하면
+            # 나머지 응답이 다시 온디맨드라 루프가 그대로 이어진다.
+            if self._storm_until.get(rel, 0.0) > now:
+                return True
+            hits = self._storm_hits.setdefault(rel, [])
+            hits.append(now)
+            cutoff = now - self.STORM_WINDOW
+            while hits and hits[0] < cutoff:
+                hits.pop(0)
+            if len(hits) <= self.STORM_LIMIT:
+                return False
+            hits.clear()
+            self._storm_until[rel] = now + self.STORM_COOLDOWN
+
+        def unfreeze():
+            local = self.root if rel == "" else os.path.join(
+                self.root, rel.replace("/", os.sep))
+            try:
+                if rel and os.path.isdir(local):
+                    self._enable_population(local)
+                with self._storm_lock:
+                    self._storm_until.pop(rel, None)
+                    self._storm_hits.pop(rel, None)
+                self.log(f"[vfs] storm-brake 해제: dir='{rel}'")
+            except Exception:                # noqa: BLE001 (해제 실패해도 동작엔 지장 없음)
+                pass
+        t = threading.Timer(self.STORM_COOLDOWN, unfreeze)
+        t.daemon = True
+        t.start()
+        return True
 
     def _space_entries(self):
         """다중 저장소 모드: 접근 가능한 저장소들을 최상위 폴더 항목으로. 매핑도 갱신."""
@@ -1087,9 +1130,16 @@ class Provider:
             except OSError:
                 existing = set()
             fresh = [e for e in entries if e["name"] not in existing]
+            # 폭주 차단: always_fresh 는 '채움 완료' 표시를 안 하므로 탐색기가 같은
+            # 폴더를 끝없이 재열거하는 루프에 빠질 수 있다(실측 초당 1800회 —
+            # CPU 를 태우고 앱이 네이티브에서 죽었다). 짧은 시간에 반복이 과하면
+            # 이번 응답만 '채움 완료'로 표시해 루프를 끊고, 잠시 뒤 다시 온디맨드로
+            # 되돌려 신선도를 회복한다.
+            storm = self._storm_check(rel, now)
             self.log(f"[vfs] FETCH_PLACEHOLDERS dir='{rel}' -> "
                      f"{len(entries)} entries (+{len(fresh)} new)"
-                     + (" [cache]" if from_cache else ""))
+                     + (" [cache]" if from_cache else "")
+                     + (" [storm-brake]" if storm else ""))
             arr, keep = self._build_placeholders(fresh)  # noqa: F841 (keep alive)
             op = C.CF_OPERATION_INFO()
             op.StructSize = ctypes.sizeof(C.CF_OPERATION_INFO)
@@ -1099,7 +1149,7 @@ class Provider:
             p = C.TRANSFER_PLACEHOLDERS_PARAMS()
             p.ParamSize = ctypes.sizeof(C.TRANSFER_PLACEHOLDERS_PARAMS)
             p.Flags = (C.CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE
-                       if self.always_fresh else
+                       if self.always_fresh and not storm else
                        C.CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION)
             p.PlaceholderTotalCount = len(fresh)
             p.PlaceholderArray = ctypes.cast(arr, C.LPVOID) if fresh else None
