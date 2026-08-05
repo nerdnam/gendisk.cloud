@@ -77,9 +77,13 @@ Windows/Android은 [클라이언트 앱](#클라이언트-앱-데스크톱모바
 
 ### Windows — [win_x64/](win_x64/README.md)
 - **genDISK 접속은 높은 호환성을 위해 FTP 프로토콜을 사용합니다** — 로그인 화면에 서버의 FTP 주소(예: `ftp.example.com:2121`)를 입력하면 됩니다 ([FTP 접속](#ftp-접속))
-- **genDISK Drive** — iCloud처럼 **탐색기 사이드바에 온디맨드 드라이브**로 나타납니다. 목록만 먼저 보이고, 파일을 열 때 자동으로 내려받습니다 (Windows Cloud Files API + FTP 전송)
+- **genDISK Drive** — **탐색기 사이드바**에 genDISK 항목으로 나타나고, 누르면 서버가 바로 열립니다. 드라이브 문자를 만들지 않으며 **목록·파일을 컴퓨터에 저장하지 않습니다** — 탐색기가 FTP 서버를 직접 읽고 씁니다 (rclone + WinFsp 마운트)
 - **일반 WebDAV 클라이언트** — NAS·Nextcloud 등 **임의의 WebDAV 서버**를 드라이브로 연결·관리 (여러 접속 프로파일 저장/전환)
 - 시작 시 자동 실행·자동 로그인, 시스템 트레이 상주. 서명 없이 단일 exe로 동작하며 main push마다 CI가 빌드합니다.
+
+> genDISK Drive 는 [WinFsp](https://winfsp.dev)(파일시스템 드라이버)와 [rclone](https://rclone.org)이 필요합니다.
+> `winget install WinFsp.WinFsp` · `winget install Rclone.Rclone` 로 각각 한 번만 설치하면 되고,
+> 없으면 앱이 설치 방법을 안내합니다. (드라이브 없이 쓰려면 탐색기 주소창에 `ftp://서버:2121` 도 가능)
 
 ### Android
 - 파일 탐색·업로드·**폴더 업로드**, 사진/동영상 미리보기, **QR 로그인**
@@ -339,7 +343,7 @@ compose.yaml 수정 후 `docker compose up -d`로 다시 올리면 반영됩니�
 
 - **FileZilla/WinSCP** — 호스트 `서버주소`, 포트 `2121`, 사용자/비밀번호는 genDISK 계정
 - **Windows 탐색기** — 주소창에 `ftp://서버주소:2121` (평문 FTP만 지원)
-- **Windows 클라이언트 앱** — 로그인 화면에 FTP 주소(`서버주소:2121`)를 입력하면 genDISK Drive(탐색기 사이드바)가 FTP로 동작합니다. 포트를 생략하면 2121 → 21 순서로 자동 시도합니다
+- **Windows 클라이언트 앱** — 로그인 화면에 FTP 주소(`서버주소:2121`)를 입력하면, 탐색기 사이드바의 **genDISK Drive** 가 이 FTP 서버로 연결됩니다 (드라이브 문자 없음, 로컬 저장 없음). 포트를 생략하면 2121 → 21 순서로 자동 시도합니다
 
 > ⚠️ **Cloudflare는 FTP를 프록시하지 않습니다.** 접속 주소는 프록시 도메인이 아니라 **서버의 실제 주소**(LAN IP, VPN 주소, 또는 DNS-only 레코드)여야 합니다.
 >
@@ -482,7 +486,7 @@ gendisk.cloud/
 │   ├── style.css
 │   ├── share.html            #   공개 공유 페이지 (/s/<토큰>)
 │   └── share.js
-├── win_x64/                  # Windows 클라이언트 (온디맨드 드라이브·WebDAV·폴더 동기화)
+├── win_x64/                  # Windows 클라이언트 (FTP 드라이브 마운트·WebDAV)
 ├── Dockerfile                # python:3.13-slim 기반 단일 이미지
 ├── compose.yaml              # 배포 구성 (볼륨/포트/헬스체크)
 ├── deploy.sh                 # 로컬 수동 빌드·푸시 스크립트

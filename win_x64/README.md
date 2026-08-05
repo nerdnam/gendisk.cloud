@@ -7,12 +7,27 @@ genDISK 서버에 연결하는 Windows용 프로그램.
 자동 시도, `ftp://` 스킴 생략 가능). 서버에서 FTP를 켜는 방법은
 [메인 README의 "FTP 접속"](../README.md#ftp-접속)을 참고하세요.
 
-1. **genDISK Drive (온디맨드)** — 탐색기 사이드바에 iCloud처럼 나타납니다. 목록만 먼저
-   보이고 파일을 열 때 FTP로 내려받으며, 드롭한 파일은 자동 업로드됩니다.
+1. **genDISK Drive** — 탐색기 **사이드바**에 genDISK 항목으로 나타나고, 누르면 서버가
+   바로 열립니다. 드라이브 문자를 만들지 않고 **목록·파일을 컴퓨터에 저장하지 않습니다**
+   — 탐색기가 FTP 서버를 직접 읽고 씁니다. 로그인하면 앱이 자동으로 연결합니다.
 2. **일반 WebDAV 클라이언트** — genDISK 외 임의의 WebDAV 서버(NAS·Nextcloud 등)를
    네트워크 드라이브(예: `N:`)로 연결·관리합니다 (여러 프로파일 저장/전환).
 
-> 폴더 동기화·WebDAV 드라이브 연결 등 HTTPS API 기반 기능은 FTP 접속에서는 쉽니다.
+### genDISK Drive 요구 사항 (각 1회 설치)
+
+```
+winget install WinFsp.WinFsp     # 파일시스템 드라이버
+winget install Rclone.Rclone     # FTP 백엔드
+```
+
+앱이 설치 여부를 확인해 없으면 안내합니다. 마운트 지점은 기본 `%USERPROFILE%\genDISK`
+(폴더 경로 — 드라이브 문자를 쓰지 않습니다). 설정 화면의 **"genDISK Drive 연결 (사이드바)"**
+스위치로 켜고 끌 수 있으며, 끄면 마운트와 사이드바 항목이 함께 정리됩니다.
+
+내부적으로 rclone 이 `--vfs-cache-mode writes`(쓰기 중에만 임시 버퍼)와
+`--dir-cache-time 10s`(짧은 목록 캐시)로 동작해, 목록·읽기는 항상 서버를 직접 봅니다.
+
+> 폴더 동기화 등 HTTPS API 기반 기능은 FTP 접속에서는 쉽니다.
 
 ## 받기 / 실행
 
@@ -60,6 +75,9 @@ win_x64/
     secret.py                비밀번호 DPAPI 암호화 저장
     autostart.py             Windows 시작 시 자동 실행 등록 (레지스트리)
     app.py                   customtkinter GUI(macOS 스타일) + 백그라운드 동기화 루프
+    ftp_client.py            FTP 전송 클라이언트 (연결 풀·범위 다운로드)
+    ftp_drive.py             rclone + WinFsp 로 서버를 폴더에 마운트 (genDISK Drive)
+    navdrive.py              탐색기 사이드바 노드 등록 (셸 네임스페이스)
     webdav_mount.py          WNetAddConnection2W 로 WebDAV 드라이브 연결/해제
   gendisk-sync.spec          PyInstaller 스펙
   build.bat                  빌드 스크립트
