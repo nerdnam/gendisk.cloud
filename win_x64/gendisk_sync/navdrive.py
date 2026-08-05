@@ -147,7 +147,7 @@ def _already_registered(root: str, icon: str, srid: str, sid: str) -> bool:
     return True
 
 
-def register_drive(root: str, icon: str, sid: str = None):
+def register_drive(root: str, icon: str, sid: str = None, folder_icon: bool = True):
     """탐색기 사이드바에 'genDISK Drive' 브랜디드 드라이브 노드를 등록한다(관리자 불필요).
 
     icon 은 반드시 영구 로컬 경로(.ico)여야 한다 — PyInstaller onefile 의 _MEIPASS
@@ -161,10 +161,12 @@ def register_drive(root: str, icon: str, sid: str = None):
     srid = sync_root_id(sid)
     if _already_registered(root, icon, srid, sid):
         # 폴더 아이콘(desktop.ini)만 유실됐으면 조용히 복구
-        if not os.path.exists(os.path.join(root, "desktop.ini")):
+        if folder_icon and not os.path.exists(os.path.join(root, "desktop.ini")):
             set_folder_icon(root, icon)
         return srid
-    set_folder_icon(root, icon)
+    if folder_icon:
+        # 원격 마운트(FTP 드라이브)에는 쓰지 않는다 — desktop.ini 가 서버로 올라간다
+        set_folder_icon(root, icon)
     # (1) HKCU 셸 네임스페이스 확장 CLSID (64/32비트) — 위임 폴더
     for croot in _CLSID_ROOTS:
         _write_clsid(croot + "\\" + NS_CLSID, root, icon)

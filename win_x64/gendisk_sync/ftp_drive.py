@@ -75,40 +75,54 @@ def configure(host: str, port: int, username: str, password: str, tls: bool = Fa
         raise RuntimeError(f"rclone 설정 실패: {(r.stderr or r.stdout)[:300]}")
 
 
-def is_mounted(drive: str) -> bool:
-    return os.path.isdir(drive.rstrip("\\") + "\\")
+def is_mounted(point: str) -> bool:
+    """마운트 지점에서 서버 내용이 보이면 True."""
+    try:
+        os.listdir(point.rstrip("\\") + "\\")
+        return True
+    except OSError:
+        return False
 
 
-def mount(drive: str, volname: str = "genDISK", timeout: float = 25.0):
-    """drive(예: 'G:')에 마운트한다. 이미 있으면 그대로 둔다."""
+def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
+    """마운트 지점에 서버를 연결한다.
+
+    지점은 **폴더 경로**를 쓴다(기본 %USERPROFILE%\\genDISK). 드라이브 문자를
+    만들지 않고, 탐색기 사이드바의 genDISK Drive 노드가 이 폴더를 가리키게 해
+    브랜디드 항목 하나로 서버를 열게 하기 위함이다. ('G:' 형식도 동작한다.)
+    rclone 은 마운트 지점이 존재하지 않아야 하므로, 비어 있으면 지우고 건다."""
     msg = requirements_message()
     if msg:
         raise RuntimeError(msg)
-    drive = drive.rstrip("\\")
-    if is_mounted(drive):
+    point = point.rstrip("\\")
+    if is_mounted(point):
         return
+    if len(point) > 2 and os.path.isdir(point):   # 폴더 지점(드라이브 문자 아님)
+        try:
+            os.rmdir(point)                       # 비어 있을 때만 성공 — 내용 보호
+        except OSError:
+            pass
     rc = rclone_path()
-    args = [rc, "mount", f"{REMOTE}:", drive,
+    args = [rc, "mount", f"{REMOTE}:", point,
             "--volname", volname,
-            "--network-mode",            # 네트워크 드라이브로 표시(탐색기 사이드바)
             "--vfs-cache-mode", "writes",  # 쓰기만 임시 버퍼 — 목록·읽기는 서버 직결
             "--dir-cache-time", "10s",   # 폴더 목록 캐시 짧게 → 항상 최신에 가깝게
             "--no-console"]
     subprocess.Popen(args, creationflags=_NOWINDOW)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if is_mounted(drive):
+        if is_mounted(point):
             return
         time.sleep(0.5)
-    raise RuntimeError(f"{drive} 마운트가 시간 안에 준비되지 않았습니다.")
+    raise RuntimeError(f"{point} 마운트가 시간 안에 준비되지 않았습니다.")
 
 
-def unmount(drive: str):
+def unmount(point: str):
     """마운트 해제 (rclone 프로세스 종료)."""
-    drive = drive.rstrip("\\")
+    point = point.rstrip("\\")
     _run(["taskkill", "/F", "/IM", "rclone.exe"], timeout=20)
     for _ in range(20):
-        if not is_mounted(drive):
+        if not is_mounted(point):
             return True
         time.sleep(0.25)
-    return not is_mounted(drive)
+    return not is_mounted(point)

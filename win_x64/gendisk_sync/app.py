@@ -142,12 +142,13 @@ class App:
                 on_quit=lambda: self.root.after(0, self._real_quit))
         except Exception:
             pass
-        # genDISK Drive 가 켜져 있고 로그인돼 있으면 시작 시 연결
-        # (FTP 세션은 토큰이 없어도 저장된 비밀번호로 FTP 전송이 가능하면 연결)
-        if self.cfg.vfs_enabled and (
-                self.cfg.token
-                or (self.cfg.is_ftp_session() and self.cfg.get_password())):
-            self._start_drive_async()
+        # 온디맨드(Cloud Files) 방식은 제거됨 — FTP 드라이브(rclone)로 대체.
+        # 구버전 설정에 남은 vfs_enabled 는 무시하고 끈다.
+        self.cfg.vfs_enabled = False
+        # FTP 세션 + 드라이브 켬이면 시작 시 자동 마운트 (자동 로그인과 무관하게)
+        if (self.cfg.is_ftp_session() and self.cfg.ftp_drive_enabled
+                and self.cfg.get_password() and not self.cfg.auto_login):
+            self._mount_ftp_drive_async()
         # 저장된 일반 WebDAV 연결 중 '자동 연결' 항목을 시작 시 마운트 (genDISK 로그인과 무관)
         if any(m.get("auto") for m in self.cfg.webdav_mounts):
             threading.Thread(target=self._auto_connect_webdav_mounts, daemon=True).start()
@@ -555,57 +556,17 @@ class App:
         # ── FTP 드라이브 (rclone + WinFsp) — 로컬 저장 없음 ──
         c = self._card(right, "genDISK 드라이브 (FTP 직결)")
         self._field_label(
-            c, "서버를 드라이브 문자로 연결합니다. 탐색기가 서버를 직접 읽고 쓰며\n"
-               "컴퓨터에 목록·파일을 저장하지 않습니다 (WinFsp·rclone 필요).").pack(fill="x")
+            c, "탐색기 사이드바의 genDISK Drive 로 서버에 바로 연결합니다.\n"
+               "드라이브 문자를 만들지 않고, 목록·파일도 컴퓨터에 저장하지 않습니다\n"
+               "(WinFsp·rclone 필요).").pack(fill="x")
         self.var_ftp_drive = tk.BooleanVar(value=getattr(self.cfg, "ftp_drive_enabled", True))
-        ctk.CTkSwitch(c, text="FTP 드라이브 연결", variable=self.var_ftp_drive,
+        ctk.CTkSwitch(c, text="genDISK Drive 연결 (사이드바)", variable=self.var_ftp_drive,
                       command=self._toggle_ftp_drive).pack(anchor="w", pady=(8, 0))
-        drow = ctk.CTkFrame(c, fg_color="transparent")
-        drow.pack(fill="x", pady=(4, 0))
-        self._field_label(drow, "드라이브 문자").pack(side="left")
-        self.cmb_ftp_drive = ctk.CTkOptionMenu(
-            drow, width=90, values=[f"{ch}:" for ch in "GHIJKLMNOPQRSTUVWXYZ"],
-            command=lambda _v: self._toggle_ftp_drive())
-        self.cmb_ftp_drive.set(getattr(self.cfg, "ftp_drive_letter", "G:") or "G:")
-        self.cmb_ftp_drive.pack(side="left", padx=(10, 0))
-
-        # ── genDISK Drive (온디맨드 클라우드) ──
-        c = self._card(right, "genDISK Drive (온디맨드)")
-        self._field_label(
-            c, "iCloud처럼 탐색기 사이드바에 genDISK 드라이브로 나타납니다.\n"
-               "파일은 목록만 먼저 보이고, 열 때 자동으로 내려받습니다(온디맨드).").pack(fill="x")
-        self.var_vfs = tk.BooleanVar(value=self.cfg.vfs_enabled)
-        ctk.CTkSwitch(c, text="genDISK Drive 연결", variable=self.var_vfs,
-                      command=self._toggle_vfs).pack(anchor="w", pady=(8, 0))
-        # 드라이브는 기본이 SMB식(폴더를 열 때마다 서버 최신 목록). 이 스위치는
-        # 백그라운드 자동 반영(실시간 SSE + 주기 대조)을 추가로 켤지에 대한 사용자 선택.
-        self.var_drive_sync = tk.BooleanVar(value=getattr(self.cfg, "vfs_sync", True))
-        ctk.CTkSwitch(c, text="원격 변경 자동 반영 (백그라운드 동기화)",
-                      variable=self.var_drive_sync,
-                      command=self._toggle_drive_sync).pack(anchor="w", pady=(8, 0))
-        self._field_label(
-            c, "끄면 SMB처럼 폴더를 열 때마다 서버에서 최신 목록을 가져옵니다(항상 정확).\n"
-               "켜면 백그라운드로 실시간 반영되고 폴더 열기는 로컬이라 훨씬 빠릅니다.").pack(
-            fill="x", pady=(2, 0))
-        # 무저장(SMB식): 파일 데이터를 로컬에 남기지 않음 — 사용자 요청 기본 켬.
-        self.var_free_space = tk.BooleanVar(value=getattr(self.cfg, "vfs_free_space", True))
-        ctk.CTkSwitch(c, text="디스크 공간 자동 확보 (파일을 컴퓨터에 남기지 않음)",
-                      variable=self.var_free_space,
-                      command=self._toggle_free_space).pack(anchor="w", pady=(8, 0))
-        self._field_label(
-            c, "업로드한 파일은 즉시, 열어본 파일은 잠시 후 서버에만 남기고 로컬에서 비웁니다.\n"
-               "탐색기에서 '항상 이 장치에 유지'로 고정한 파일은 남겨둡니다.").pack(
-            fill="x", pady=(2, 0))
-        # FTP 전송: 파일 목록·전송을 서버 내장 FTP 로 보낸다 (실시간 반영은 API 유지).
-        self.var_ftp = tk.BooleanVar(value=getattr(self.cfg, "vfs_transport", "api") == "ftp")
-        ctk.CTkSwitch(c, text="FTP 전송 사용 (서버 내장 FTP 로 파일 전송)",
-                      variable=self.var_ftp,
-                      command=self._toggle_ftp_transport).pack(anchor="w", pady=(8, 0))
         frow = ctk.CTkFrame(c, fg_color="transparent")
         frow.pack(fill="x", pady=(4, 0))
         self._field_label(frow, "FTP 호스트").pack(side="left")
         self.e_ftp_host = ctk.CTkEntry(frow, width=180,
-                                       placeholder_text="서버 IP (예: 192.168.1.241)")
+                                       placeholder_text="예: ftp.pureluv.co")
         if getattr(self.cfg, "ftp_host", ""):
             self.e_ftp_host.insert(0, self.cfg.ftp_host)
         self.e_ftp_host.pack(side="left", padx=(8, 0))
@@ -613,21 +574,6 @@ class App:
         self.e_ftp_port = ctk.CTkEntry(frow, width=64)
         self.e_ftp_port.insert(0, str(getattr(self.cfg, "ftp_port", 2121)))
         self.e_ftp_port.pack(side="left", padx=(8, 0))
-        self._field_label(
-            c, "Cloudflare 는 FTP 를 중계하지 않으므로 호스트는 서버의 실제 주소여야\n"
-               "합니다 (같은 네트워크/VPN 의 IP). 저장된 로그인 정보로 접속합니다.").pack(
-            fill="x", pady=(2, 0))
-        vrow = ctk.CTkFrame(c, fg_color="transparent")
-        vrow.pack(fill="x", pady=(8, 0))
-        self.btn_drive_refresh = ctk.CTkButton(
-            vrow, text="지금 새로고침", width=120, command=self._drive_refresh_now,
-            fg_color=ACCENT, hover_color=ACCENT_HOVER)
-        self.btn_drive_refresh.pack(side="left")
-        self.btn_drive_reconnect = ctk.CTkButton(
-            vrow, text="다시 연결", width=110, command=self._drive_reconnect,
-            fg_color="transparent", border_width=1,
-            text_color=ACCENT, hover_color=("gray90", "gray25"))
-        self.btn_drive_reconnect.pack(side="left", padx=(8, 0))
 
         # ── 상태 & 로그 ──
         c = self._card(right, "상태")
@@ -724,26 +670,12 @@ class App:
                 self.cmb_space.configure(values=ids or ["home"])
                 if cfg.space not in ids:
                     self.cmb_space.set(ids[0] if ids else "home")
-                self.var_ftp.set(True)
                 self.e_ftp_host.delete(0, "end"); self.e_ftp_host.insert(0, host)
                 self.e_ftp_port.delete(0, "end"); self.e_ftp_port.insert(0, str(port))
                 self._show_settings()
                 self.log(f"FTP 로그인 성공 ({host}:{port})")
                 if cfg.ftp_drive_enabled:
                     self._mount_ftp_drive_async()
-                if cfg.vfs_enabled:
-                    if self.drive.running:
-                        # 이미 떠 있는 드라이브는 옛 연결(이전 서버/전송)을 물고 있다
-                        # → 완전히 재시작해 새 FTP 설정으로 붙인다.
-                        def rework():
-                            try:
-                                self.drive.restart()
-                                self.log("genDISK Drive 를 FTP 전송으로 다시 연결했습니다.")
-                            except Exception as e:  # noqa: BLE001
-                                self.log(f"드라이브 재연결 실패: {e}")
-                        threading.Thread(target=rework, daemon=True).start()
-                    else:
-                        self._start_drive_async()
             self.root.after(0, done)
         threading.Thread(target=work, daemon=True).start()
 
@@ -855,8 +787,6 @@ class App:
                 return
             if cfg.ftp_drive_enabled:
                 self._mount_ftp_drive_async()
-            if cfg.vfs_enabled:
-                self._start_drive_async()
             return
         try:
             c = GenDiskClient(cfg.server_url)
@@ -1100,7 +1030,7 @@ class App:
 
         def work():
             from . import ftp_drive
-            drive = cfg.ftp_drive_letter or "G:"
+            point = cfg.ftp_mount_path()
             try:
                 msg = ftp_drive.requirements_message()
                 if msg:
@@ -1110,26 +1040,38 @@ class App:
                     return
                 ftp_drive.configure(cfg.ftp_host, cfg.ftp_port, cfg.username, pw,
                                     tls=bool(getattr(cfg, "ftp_tls", False)))
-                ftp_drive.mount(drive)
-                self.set_status(f"{drive} 드라이브 연결됨 (FTP)", SUCCESS)
-                self.log(f"{drive} 드라이브를 연결했습니다 — 탐색기에서 확인하세요.")
+                ftp_drive.mount(point)
+                # 드라이브 문자를 만들지 않고, 탐색기 사이드바의 'genDISK Drive'
+                # 브랜디드 노드가 이 마운트 지점을 가리키게 한다.
+                # desktop.ini 는 서버로 올라가므로 쓰지 않는다(folder_icon=False).
+                try:
+                    from . import navdrive
+                    from .drive import stable_icon_path
+                    navdrive.register_drive(point, stable_icon_path(), folder_icon=False)
+                except Exception as e:  # noqa: BLE001 (노드 없이도 마운트는 동작)
+                    self.log(f"사이드바 노드 등록 실패(무시): {e}")
+                self.set_status("genDISK Drive 연결됨 (FTP)", SUCCESS)
+                self.log("genDISK Drive 를 연결했습니다 — 탐색기 사이드바에서 확인하세요.")
             except Exception as e:  # noqa: BLE001
                 self.set_status("FTP 드라이브 연결 실패", DANGER)
                 self.log(f"FTP 드라이브 연결 실패: {e}")
         threading.Thread(target=work, daemon=True).start()
 
     def _unmount_ftp_drive(self):
-        from . import ftp_drive
-        drive = self.cfg.ftp_drive_letter or "G:"
+        from . import ftp_drive, navdrive
+        point = self.cfg.ftp_mount_path()
         try:
-            if ftp_drive.unmount(drive):
-                self.log(f"{drive} 드라이브 연결을 해제했습니다.")
+            navdrive.unregister_drive()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if ftp_drive.unmount(point):
+                self.log("genDISK Drive 연결을 해제했습니다.")
         except Exception as e:  # noqa: BLE001
             self.log(f"FTP 드라이브 해제 실패: {e}")
 
     def _toggle_ftp_drive(self):
         self.cfg.ftp_drive_enabled = self.var_ftp_drive.get()
-        self.cfg.ftp_drive_letter = self.cmb_ftp_drive.get() or "G:"
         self.cfg.save()
         if self.cfg.ftp_drive_enabled:
             self._mount_ftp_drive_async()
@@ -1281,12 +1223,12 @@ class App:
         except ValueError:
             self.cfg.interval_sec = 30
         self.cfg.enabled = self.var_enabled.get()
-        self.cfg.vfs_transport = "ftp" if self.var_ftp.get() else "api"
         self.cfg.ftp_host = self.e_ftp_host.get().strip()
         try:
             self.cfg.ftp_port = int(self.e_ftp_port.get().strip() or 2121)
         except ValueError:
             self.cfg.ftp_port = 2121
+        self.cfg.ftp_drive_enabled = self.var_ftp_drive.get()
         self.cfg.save_credentials = self.var_savecred.get()
         self.cfg.auto_start = self.var_autostart.get()
         self.cfg.auto_login = self.var_autologin.get()

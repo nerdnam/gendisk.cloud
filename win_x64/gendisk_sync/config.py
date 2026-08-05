@@ -58,7 +58,13 @@ class Config:
     # FTP 드라이브(rclone+WinFsp): 서버를 실제 드라이브 문자로 마운트한다.
     # 로컬에 목록·파일을 두지 않고 탐색기가 서버를 직접 본다(온디맨드 대체).
     ftp_drive_enabled: bool = True
-    ftp_drive_letter: str = "G:"
+    # 마운트 지점: 비우면 %USERPROFILE%\genDISK. 드라이브 문자를 만들지 않고
+    # 탐색기 사이드바의 'genDISK Drive' 항목이 이 폴더를 가리킨다.
+    ftp_mount_point: str = ""
+
+    def ftp_mount_path(self) -> str:
+        import os
+        return self.ftp_mount_point or os.path.expandvars(r"%USERPROFILE%\genDISK")
     # 일반(범용) WebDAV 서버 연결 목록. 각 항목은 dict:
     #   {name, url, username, password_enc(DPAPI), drive, auto(bool)}
     # genDISK 서버 마운트와 별개로, 임의 WebDAV 서버(NAS/Nextcloud 등)를 드라이브로 연결.
