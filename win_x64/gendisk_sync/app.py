@@ -562,6 +562,14 @@ class App:
         self.var_ftp_drive = tk.BooleanVar(value=getattr(self.cfg, "ftp_drive_enabled", True))
         ctk.CTkSwitch(c, text="genDISK Drive 연결 (사이드바)", variable=self.var_ftp_drive,
                       command=self._toggle_ftp_drive).pack(anchor="w", pady=(8, 0))
+        self.var_no_preview = tk.BooleanVar(value=getattr(self.cfg, "ftp_no_preview", True))
+        ctk.CTkSwitch(c, text="탐색기 미리 보기·썸네일 끄기 (서버 부하 감소)",
+                      variable=self.var_no_preview,
+                      command=self._toggle_no_preview).pack(anchor="w", pady=(8, 0))
+        self._field_label(
+            c, "탐색기는 썸네일을 만들려고 폴더 안 파일을 통째로 내려받습니다.\n"
+               "끄면 그 트래픽이 사라집니다. (탐색기 전역 설정이며 해제 시 복원됩니다)").pack(
+            fill="x", pady=(2, 0))
         frow = ctk.CTkFrame(c, fg_color="transparent")
         frow.pack(fill="x", pady=(4, 0))
         self._field_label(frow, "FTP 호스트").pack(side="left")
@@ -1069,6 +1077,16 @@ class App:
                     navdrive.register_drive(point, stable_icon_path(), folder_icon=False)
                 except Exception as e:  # noqa: BLE001 (노드 없이도 마운트는 동작)
                     self.log(f"사이드바 노드 등록 실패(무시): {e}")
+                # 탐색기가 썸네일을 만들려고 파일을 통째로 내려받는 것을 막는다
+                # (서버 부하의 대부분) — 사용자가 끈 경우엔 건드리지 않는다.
+                if getattr(cfg, "ftp_no_preview", True):
+                    try:
+                        from . import explorer_preview
+                        if explorer_preview.disable():
+                            self.log("탐색기 미리 보기·썸네일을 껐습니다 "
+                                     "(서버에서 파일을 미리 받지 않도록).")
+                    except Exception as e:  # noqa: BLE001
+                        self.log(f"미리 보기 끄기 실패(무시): {e}")
                 self.set_status("genDISK Drive 연결됨 (FTP)", SUCCESS)
                 self.log("genDISK Drive 를 연결했습니다 — 탐색기 사이드바에서 확인하세요.")
             except Exception as e:  # noqa: BLE001
@@ -1077,10 +1095,14 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def _unmount_ftp_drive(self):
-        from . import ftp_drive, navdrive
+        from . import explorer_preview, ftp_drive, navdrive
         point = self.cfg.ftp_mount_path()
         try:
             navdrive.unregister_drive()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            explorer_preview.restore()   # 껐던 미리 보기를 원래대로
         except Exception:  # noqa: BLE001
             pass
         try:
@@ -1088,6 +1110,22 @@ class App:
                 self.log("genDISK Drive 연결을 해제했습니다.")
         except Exception as e:  # noqa: BLE001
             self.log(f"FTP 드라이브 해제 실패: {e}")
+
+    def _toggle_no_preview(self):
+        """탐색기 미리 보기·썸네일 끄기 켬/끔 — 즉시 적용(해제 시 원래 설정 복원)."""
+        from . import explorer_preview
+        self.cfg.ftp_no_preview = self.var_no_preview.get()
+        self.cfg.save()
+        try:
+            if self.cfg.ftp_no_preview:
+                explorer_preview.disable()
+                self.log("탐색기 미리 보기·썸네일을 껐습니다.")
+            else:
+                explorer_preview.restore()
+                self.log("탐색기 미리 보기·썸네일을 원래대로 되돌렸습니다.")
+            self.log("  (이미 열려 있는 탐색기 창은 다시 열어야 반영됩니다)")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"미리 보기 설정 변경 실패: {e}")
 
     def _toggle_ftp_drive(self):
         self.cfg.ftp_drive_enabled = self.var_ftp_drive.get()
@@ -1248,6 +1286,7 @@ class App:
         except ValueError:
             self.cfg.ftp_port = 2121
         self.cfg.ftp_drive_enabled = self.var_ftp_drive.get()
+        self.cfg.ftp_no_preview = self.var_no_preview.get()
         self.cfg.save_credentials = self.var_savecred.get()
         self.cfg.auto_start = self.var_autostart.get()
         self.cfg.auto_login = self.var_autologin.get()
