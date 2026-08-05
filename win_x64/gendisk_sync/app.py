@@ -662,12 +662,14 @@ class App:
             def done():
                 self.btn_login.configure(state="normal", text="로그인")
                 cfg = self.cfg
-                cfg.server_url = f"ftp://{host}:{port}"
-                cfg.username = user
-                cfg.token = ""                     # API 세션 없음 (FTP 전용)
+                # 순서 주의: 드라이브 스레드가 설정을 실시간으로 읽으므로, 전송 방식을
+                # 먼저 FTP 로 바꾼 뒤 토큰을 비운다 (그 사이 API 경로로 새는 창 차단).
                 cfg.vfs_transport = "ftp"
                 cfg.ftp_host = host
                 cfg.ftp_port = port
+                cfg.username = user
+                cfg.server_url = f"ftp://{host}:{port}"
+                cfg.token = ""                     # API 세션 없음 (FTP 전용)
                 self._pw = pw
                 cfg.save_credentials = self.var_savecred.get()
                 if cfg.save_credentials:
@@ -686,7 +688,18 @@ class App:
                 self.log(f"FTP 로그인 성공 ({host}:{port}) — 드라이브 전송: FTP\n"
                          "  (FTP 접속에서는 폴더 동기화·WebDAV 드라이브 등 API 기능이 쉽니다)")
                 if cfg.vfs_enabled:
-                    self._start_drive_async()
+                    if self.drive.running:
+                        # 이미 떠 있는 드라이브는 옛 연결(이전 서버/전송)을 물고 있다
+                        # → 완전히 재시작해 새 FTP 설정으로 붙인다.
+                        def rework():
+                            try:
+                                self.drive.restart()
+                                self.log("genDISK Drive 를 FTP 전송으로 다시 연결했습니다.")
+                            except Exception as e:  # noqa: BLE001
+                                self.log(f"드라이브 재연결 실패: {e}")
+                        threading.Thread(target=rework, daemon=True).start()
+                    else:
+                        self._start_drive_async()
             self.root.after(0, done)
         threading.Thread(target=work, daemon=True).start()
 

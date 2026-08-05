@@ -119,14 +119,16 @@ class DriveController:
         self._delta_supported = None    # None=미확인(첫 패스에서 /info features 로 판별)
 
     def _make_log(self, applog):
-        """GUI 로그 + 파일 로그(%LOCALAPPDATA%\\genDISK\\drive.log) 동시 기록(진단용)."""
+        """GUI 로그 + 파일 로그(%LOCALAPPDATA%\\genDISK\\drive.log) 동시 기록(진단용).
+        파일 쪽에는 타임스탬프를 붙인다 — 간헐 오류의 발생 시점을 짚을 수 있게."""
         path = _log_path()
 
         def _log(msg):
             try:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
+                stamp = time.strftime("%m-%d %H:%M:%S")
                 with open(path, "a", encoding="utf-8") as f:
-                    f.write(str(msg) + "\n")
+                    f.write(f"{stamp} {msg}\n")
             except OSError:
                 pass
             try:

@@ -279,8 +279,10 @@ def maybe_start() -> threading.Thread | None:
         handler.masquerade_address = masq
 
     server = ThreadedFTPServer(("0.0.0.0", port), handler)
-    server.max_cons = 64
-    server.max_cons_per_ip = 16
+    # 온디맨드 드라이브(연결 풀)·탐색기 열람 폭주 + NAT 뒤 여러 기기가 한 IP 로
+    # 몰리는 상황을 고려해 넉넉히 잡는다 (기본 16 은 간헐 421 거부를 유발했음)
+    server.max_cons = 256
+    server.max_cons_per_ip = 64
 
     t = threading.Thread(target=server.serve_forever, name="gendisk-ftp", daemon=True)
     t.start()

@@ -15,16 +15,18 @@ import ftplib
 import os
 import socket
 import threading
+import time
 from datetime import datetime, timezone
 
 from .client import AuthError
 
 _BLOCK = 64 * 1024
+_MAX_LIVE = 8          # 동시 연결 상한 — 서버 per-IP 제한·연결 폭주 방지 (초과분은 대기)
 
 
 class FtpDriveClient:
     def __init__(self, host: str, port: int, username: str, password: str,
-                 tls: bool = False, timeout: int = 12, pool_size: int = 6):
+                 tls: bool = False, timeout: int = 15, pool_size: int = 6):
         self.host = host
         self.port = port
         self.username = username
@@ -34,6 +36,7 @@ class FtpDriveClient:
         self._pool: list[ftplib.FTP] = []
         self._lock = threading.Lock()
         self._pool_size = pool_size
+        self._live = threading.BoundedSemaphore(_MAX_LIVE)
 
     # ---------- 연결 풀 ----------
     def _new_conn(self) -> ftplib.FTP:
@@ -62,25 +65,35 @@ class FtpDriveClient:
             pass
 
     def _acquire(self) -> ftplib.FTP:
-        with self._lock:
-            while self._pool:
-                ftp = self._pool.pop()
-                try:
-                    ftp.voidcmd("NOOP")           # 유휴 타임아웃으로 죽은 연결 걸러내기
-                    return ftp
-                except Exception:
-                    self._close_quiet(ftp)
-        return self._new_conn()
+        # 동시 사용 연결 수를 제한 — 탐색기 열람 폭주가 서버 per-IP 제한을 치지 않게.
+        if not self._live.acquire(timeout=30):
+            raise OSError("FTP 연결 대기 시간 초과 (동시 요청 과다)")
+        try:
+            with self._lock:
+                while self._pool:
+                    ftp = self._pool.pop()
+                    try:
+                        ftp.voidcmd("NOOP")       # 유휴 타임아웃으로 죽은 연결 걸러내기
+                        return ftp
+                    except Exception:
+                        self._close_quiet(ftp)
+            return self._new_conn()
+        except BaseException:
+            self._live.release()
+            raise
 
     def _release(self, ftp: ftplib.FTP, dirty: bool = False):
-        if dirty:
-            self._close_quiet(ftp)
-            return
-        with self._lock:
-            if len(self._pool) < self._pool_size:
-                self._pool.append(ftp)
+        try:
+            if dirty:
+                self._close_quiet(ftp)
                 return
-        self._close_quiet(ftp)
+            with self._lock:
+                if len(self._pool) < self._pool_size:
+                    self._pool.append(ftp)
+                    return
+            self._close_quiet(ftp)
+        finally:
+            self._live.release()
 
     def close(self):
         with self._lock:
@@ -89,21 +102,30 @@ class FtpDriveClient:
             self._pool.clear()
 
     def _run(self, fn):
-        """풀에서 연결을 빌려 fn(ftp) 실행. 끊긴 연결이면 새 연결로 1회 재시도."""
-        for attempt in (1, 2):
+        """풀에서 연결을 빌려 fn(ftp) 실행. 끊긴 연결·일시 오류(421 등)는
+        짧은 백오프 후 새 연결로 재시도한다 (VPN 순단·서버 혼잡 내성)."""
+        attempts = 3
+        for attempt in range(1, attempts + 1):
             ftp = self._acquire()
             try:
                 out = fn(ftp)
             except _Truncated:
                 self._release(ftp, dirty=True)    # 전송 중단 — 제어 연결 폐기, 데이터는 유효
                 raise
+            except ftplib.error_temp:
+                self._release(ftp, dirty=True)    # 421 혼잡 등 — 잠시 쉬었다 재시도
+                if attempt == attempts:
+                    raise
+                time.sleep(0.5 * attempt)
+                continue
             except ftplib.error_perm:
                 self._release(ftp)                # 프로토콜은 정상 — 연결 재사용
                 raise
             except (OSError, EOFError, ftplib.Error):
                 self._release(ftp, dirty=True)
-                if attempt == 2:
+                if attempt == attempts:
                     raise
+                time.sleep(0.2 * attempt)
                 continue
             self._release(ftp)
             return out
@@ -183,8 +205,19 @@ class FtpDriveClient:
             if complete:
                 ftp.voidresp()                     # 226 — 제어 연결 재사용 가능
                 return b"".join(chunks)
-            # 중간에 끊었음 → 제어 연결 상태를 신뢰할 수 없으니 버린다
-            raise _Truncated(b"".join(chunks))
+            # 필요한 만큼만 읽고 전송을 끊었음 — ABOR 로 정리하면 제어 연결을
+            # 재사용할 수 있다(재접속 폭주 방지). 실패하면 연결을 버린다.
+            try:
+                ftp.abort()
+                # pyftpdlib 는 중단 시 응답을 두 줄(426 + 226) 보내는데 ftplib.abort()
+                # 는 한 줄만 읽는다 — 남은 한 줄을 소진해야 다음 명령이 어긋나지 않는다.
+                try:
+                    ftp.voidresp()
+                except ftplib.Error:
+                    pass
+                return b"".join(chunks)
+            except Exception:
+                raise _Truncated(b"".join(chunks))
 
         try:
             return self._run(go)
