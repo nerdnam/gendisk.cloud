@@ -24,6 +24,27 @@ from .webdav_mount import (
     cleanup_stale_webdav, connect_drive, connect_url, disconnect_drive,
     start_webclient_elevated, webclient_running)
 
+def _crash_log_path() -> str:
+    import os
+    return os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+                        "genDISK", "crash.log")
+
+
+def _report_tk_exception(exc_type, exc, tb):
+    """Tk 콜백 예외 기록 (창은 계속 살린다)."""
+    import os
+    import time
+    import traceback
+    try:
+        path = _crash_log_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} [tk] =====\n")
+            traceback.print_exception(exc_type, exc, tb, file=f)
+    except OSError:
+        pass
+
+
 # macOS 시스템 강조색 (라이트/다크). accent 버튼에 사용.
 ACCENT = ("#007AFF", "#0A84FF")
 ACCENT_HOVER = ("#0063CC", "#3D9BFF")
@@ -93,6 +114,11 @@ class App:
         # 이번 세션의 비밀번호(WebDAV 드라이브 연결용). 저장 여부와 무관하게 메모리에 보관.
         self._pw = self.cfg.get_password()
         self.root = ctk.CTk()
+        # Tk 콜백에서 난 예외도 crash.log 로 (기본은 콘솔로 새어 사라진다)
+        try:
+            self.root.report_callback_exception = _report_tk_exception
+        except Exception:  # noqa: BLE001
+            pass
         self.root.title("genDISK")
         self.root.geometry("1120x1020")  # 2열 배치 — 드라이브 옵션·상태 로그까지 스크롤 없이 보이는 높이
         self.root.minsize(980, 760)
@@ -1326,17 +1352,60 @@ class App:
     def set_status(self, text, color=MUTED):
         self.root.after(0, lambda: self.lbl_status.configure(text=text, text_color=color))
 
+    # 화면 로그는 최근 것만 남긴다. 드라이브 콜백이 초당 수십 줄을 뿜을 수 있어
+    # 무한히 쌓으면 Tk 위젯 메모리와 after() 큐가 함께 불어나 앱이 죽는다
+    # (탐색기에는 '클라우드 파일 공급자가 예기치 않게 종료' 로 보인다).
+    LOG_MAX_LINES = 400
+
     def log(self, text):
         def _append():
-            self.txt_log.configure(state="normal")
-            self.txt_log.insert("end", text + "\n")
-            self.txt_log.see("end")
-            self.txt_log.configure(state="disabled")
+            try:
+                self.txt_log.configure(state="normal")
+                self.txt_log.insert("end", text + "\n")
+                # 넘치면 앞부분을 잘라낸다
+                n = int(self.txt_log.index("end-1c").split(".")[0])
+                if n > self.LOG_MAX_LINES:
+                    self.txt_log.delete("1.0", f"{n - self.LOG_MAX_LINES}.0")
+                self.txt_log.see("end")
+                self.txt_log.configure(state="disabled")
+            except Exception:      # noqa: BLE001 (창 종료 중이면 무시)
+                pass
         self.root.after(0, _append)
 
     def run(self):
         self.root.mainloop()
 
 
+def _install_crash_logger():
+    """처리 안 된 예외를 %LOCALAPPDATA%\\genDISK\\crash.log 에 남긴다.
+    창이 있는 exe(콘솔 없음)라 예외가 조용히 사라지면 원인 추적이 불가능하다."""
+    import os
+    import sys
+    import threading as _th
+    import time
+    import traceback
+
+    path = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+                        "genDISK", "crash.log")
+
+    def write(where, exc_type, exc, tb):
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} [{where}] =====\n")
+                traceback.print_exception(exc_type, exc, tb, file=f)
+        except OSError:
+            pass
+
+    def hook(exc_type, exc, tb):
+        write("main", exc_type, exc, tb)
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = hook
+    _th.excepthook = lambda a: write(f"thread:{a.thread and a.thread.name}",
+                                     a.exc_type, a.exc_value, a.exc_traceback)
+
+
 def main(startup: bool = False):
+    _install_crash_logger()
     App(startup=startup).run()

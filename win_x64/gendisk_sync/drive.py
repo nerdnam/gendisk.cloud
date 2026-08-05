@@ -6,6 +6,7 @@ vfs.Provider(CfAPI 온디맨드) 를 서버 클라이언트에 연결하고, nav
 """
 import json
 import os
+import queue
 import shutil
 import threading
 import time
@@ -120,22 +121,80 @@ class DriveController:
 
     def _make_log(self, applog):
         """GUI 로그 + 파일 로그(%LOCALAPPDATA%\\genDISK\\drive.log) 동시 기록(진단용).
-        파일 쪽에는 타임스탬프를 붙인다 — 간헐 오류의 발생 시점을 짚을 수 있게."""
+
+        중요: CfAPI 콜백 스레드에서 직접 디스크에 쓰면 안 된다. 탐색기가 폴더를
+        연달아 열거하면 초당 수십 줄이 쏟아지는데, 그때마다 큰 로그 파일을
+        열고 append 하면 콜백이 지연되고 Windows 가 공급자를 강제 종료한다
+        ('클라우드 파일 공급자가 예기치 않게 종료되었습니다'). 그래서
+        큐에 넣고 전용 스레드가 쓰며, 파일은 회전시키고 같은 줄의 연속 반복은
+        접어서 남긴다."""
         path = _log_path()
+        q = self._log_queue = queue.SimpleQueue()
+
+        def writer():
+            last = None
+            repeat = 0
+            while True:
+                try:
+                    msg = q.get()
+                except Exception:
+                    return
+                stamp = time.strftime("%m-%d %H:%M:%S")
+                try:
+                    if msg == last:          # 동일 줄 연속 반복은 세기만 한다
+                        repeat += 1
+                        if repeat % 200:     # 200 번마다 한 줄로 요약
+                            continue
+                        out = f"{stamp} … 위 줄 {repeat}회 반복\n"
+                    else:
+                        if repeat:
+                            repeat = 0
+                        last = msg
+                        out = f"{stamp} {msg}\n"
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    self._rotate_log(path)
+                    with open(path, "a", encoding="utf-8") as f:
+                        f.write(out)
+                except OSError:
+                    pass
+
+        threading.Thread(target=writer, name="gendisk-drivelog", daemon=True).start()
+
+        gui = {"last": 0.0, "msg": None}
 
         def _log(msg):
+            msg = str(msg)
             try:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                stamp = time.strftime("%m-%d %H:%M:%S")
-                with open(path, "a", encoding="utf-8") as f:
-                    f.write(f"{stamp} {msg}\n")
-            except OSError:
+                q.put(msg)                   # 논블로킹 — 콜백 스레드를 잡지 않는다
+            except Exception:
                 pass
+            # 화면에는 폴더 열람 같은 고빈도 줄을 그대로 흘리지 않는다(초당 최대 2줄,
+            # 같은 줄 연속 반복은 생략) — Tk 위젯·after 큐 폭주로 앱이 죽는 걸 막는다.
+            now = time.monotonic()
+            if msg == gui["msg"] or now - gui["last"] < 0.5:
+                return
+            gui["last"], gui["msg"] = now, msg
             try:
                 applog(msg)
             except Exception:
                 pass
         return _log
+
+    @staticmethod
+    def _rotate_log(path: str, limit: int = 4 * 1024 * 1024):
+        """로그가 커지면 .1 로 밀어낸다 (직전 1개만 보관)."""
+        try:
+            if os.path.getsize(path) < limit:
+                return
+        except OSError:
+            return
+        try:
+            old = path + ".1"
+            if os.path.exists(old):
+                os.remove(old)
+            os.replace(path, old)
+        except OSError:
+            pass
 
     def _list_spaces(self):
         return self._with_reauth(lambda c: c.spaces(), fast=True, io=True)
