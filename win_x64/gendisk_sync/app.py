@@ -232,6 +232,13 @@ class App:
             self.drive.stop()   # provider 연결만 해제(노드/싱크루트는 유지 → 다음 실행 시 재연결)
         except Exception:
             pass
+        # 종료 시 탐색기 썸네일 설정을 원래대로 — 앱이 없으면 되돌릴 UI 도 없어서
+        # 시스템 전역 설정이 꺼진 채로 남아버린다. (마운트는 유지: 드라이브는 계속 쓸 수 있게)
+        try:
+            from . import explorer_preview
+            explorer_preview.restore()
+        except Exception:
+            pass
         self.worker.stop()
         if self.tray is not None:
             try:
@@ -629,35 +636,49 @@ class App:
     def _ftp_login(self, host: str, port: int | None, user: str, pw: str):
         """FTP 로그인. 성공하면 FTP 세션으로 전환 — 드라이브(탐색기 사이드바)는
         FTP 전송으로 동작하고, 동기화·WebDAV 등 API 전용 기능은 쉰다."""
+        if getattr(self, "_login_busy", False):
+            return                     # Enter 연타 등으로 로그인이 겹치면 마운트가 경쟁한다
+        self._login_busy = True
         self.lbl_login_error.configure(text="")
         self.btn_login.configure(state="disabled", text="FTP 연결 중…")
 
+        def unlock():
+            """어떤 경로로 끝나든 버튼을 되살린다 — 안 그러면 재시작 전까지 로그인 불가."""
+            self._login_busy = False
+            try:
+                self.btn_login.configure(state="normal", text="로그인")
+            except Exception:  # noqa: BLE001 (창이 닫히는 중이면 무시)
+                pass
+
         def work():
             nonlocal port
-            from .ftp_client import FtpDriveClient
-            ports = [port] if port else [2121, 21]
             spaces = None
             last_err = None
-            for p in ports:
-                try:
-                    c = FtpDriveClient(host, p, user, pw)
-                    spaces = c.spaces()
-                    c.close()
-                    port = p
-                    break
-                except AuthError as e:
-                    last_err = e                    # 연결은 됐고 비밀번호가 틀림 — 즉시 중단
-                    break
-                except Exception as e:  # noqa: BLE001
-                    last_err = e
+            try:
+                from .ftp_client import FtpDriveClient
+                ports = [port] if port else [2121, 21]
+                for p in ports:
+                    try:
+                        c = FtpDriveClient(host, p, user, pw)
+                        spaces = c.spaces()
+                        c.close()
+                        port = p
+                        break
+                    except AuthError as e:
+                        last_err = e                # 연결은 됐고 비밀번호가 틀림 — 즉시 중단
+                        break
+                    except Exception as e:  # noqa: BLE001
+                        last_err = e
+            except BaseException as e:              # noqa: BLE001 (import 실패 등)
+                last_err = e
             if spaces is None:
                 self.root.after(0, lambda: (
-                    self.btn_login.configure(state="normal", text="로그인"),
+                    unlock(),
                     self.lbl_login_error.configure(text=str(last_err))))
                 return
 
             def done():
-                self.btn_login.configure(state="normal", text="로그인")
+                unlock()
                 cfg = self.cfg
                 # 순서 주의: 드라이브 스레드가 설정을 실시간으로 읽으므로, 전송 방식을
                 # 먼저 FTP 로 바꾼 뒤 토큰을 비운다 (그 사이 API 경로로 새는 창 차단).
@@ -769,6 +790,12 @@ class App:
         self.cfg.auto_login = False
         self.var_autologin.set(False)
         self.cfg.clear_password()
+        # FTP 세션 표식(server_url=ftp://…)까지 지워야 실제로 로그아웃된다.
+        # 남겨두면 드라이브가 마운트된 채로 있고, 다음 실행에서 자격증명도 없이
+        # '로그인된 화면'이 떠 버린다.
+        if self.cfg.is_ftp_session():
+            threading.Thread(target=self._unmount_ftp_drive, daemon=True).start()
+        self.cfg.server_url = ""
         self.cfg.save()
         self.e_pw.delete(0, "end")   # 저장 비번을 지웠으니 프리필도 비움
         self.lbl_login_error.configure(text="")
@@ -1302,10 +1329,23 @@ class App:
         self._apply_autostart()
         self.log("설정을 저장했습니다.")
 
+    # 폴더 동기화는 HTTPS API(/api/sync) 기능이라 FTP 접속에서는 동작하지 않는다.
+    # 예전에는 스위치를 켜도 조용히 아무 일도 없었고, '지금 동기화'는 로그인 상태인데도
+    # "로그인하세요" 경고를 띄웠다 — 이제 이유를 분명히 알린다.
+    _SYNC_UNAVAILABLE = ("FTP 접속에서는 폴더 동기화를 지원하지 않습니다.\n"
+                         "탐색기 사이드바의 genDISK Drive 를 사용하세요.")
+
     def _toggle_enabled(self):
+        if self.cfg.is_ftp_session() and self.var_enabled.get():
+            self.var_enabled.set(False)
+            messagebox.showinfo("지원하지 않음", self._SYNC_UNAVAILABLE)
+            return
         self._collect(); self.cfg.save(); self.worker.sync_now()
 
     def _sync_now(self):
+        if self.cfg.is_ftp_session():
+            messagebox.showinfo("지원하지 않음", self._SYNC_UNAVAILABLE)
+            return
         self._collect(); self.cfg.save()
         if not self.cfg.is_ready():
             messagebox.showwarning("설정 필요", "로그인하고 로컬 폴더를 지정하세요.")

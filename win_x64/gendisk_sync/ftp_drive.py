@@ -128,13 +128,62 @@ def configure(host: str, port: int, username: str, password: str, tls: bool = Fa
         raise RuntimeError(f"rclone 설정 실패: {(r.stderr or r.stdout)[:300]}")
 
 
+#: WinFsp 가 보고하는 파일시스템 이름(마운트 판별용). 일반 폴더는 NTFS/FAT 등이 나온다.
+_WINFSP_FS_NAMES = ("WinFsp", "FUSE", "rclone")
+
+
+def filesystem_name(point: str) -> str | None:
+    """마운트 지점의 파일시스템 이름. 실패하면 None."""
+    import ctypes
+    buf = ctypes.create_unicode_buffer(256)
+    ok = ctypes.windll.kernel32.GetVolumeInformationW(
+        ctypes.c_wchar_p(point.rstrip("\\") + "\\"),
+        None, 0, None, None, None, buf, ctypes.sizeof(buf) // 2)
+    return buf.value if ok else None
+
+
 def is_mounted(point: str) -> bool:
-    """마운트 지점에서 서버 내용이 보이면 True."""
+    """마운트 지점이 **실제로 rclone/WinFsp 마운트인지** 확인한다.
+
+    주의: 예전에는 'os.listdir 가 되면 마운트됨'으로 판정했는데, 구버전(온디맨드)이
+    남긴 로컬 폴더도 목록이 읽히는 바람에 mount() 가 그냥 반환해 버렸다. 그러면 앱은
+    '연결됨'이라고 알리는데 사용자는 서버가 아닌 죽은 로컬 폴더를 보게 된다.
+    그래서 파일시스템 종류로 진짜 마운트인지 가린다."""
+    point = point.rstrip("\\")
+    if not os.path.isdir(point):
+        return False
+    fs = filesystem_name(point)
+    if fs is None:
+        return False        # 일반 폴더는 볼륨 정보가 없다(ERROR_DIR_NOT_ROOT)
+    if len(point) <= 2:      # 드라이브 문자 지점: 진짜 디스크와 구분해야 한다
+        return any(k.lower() in fs.lower() for k in _WINFSP_FS_NAMES)
+    return True              # 폴더 지점에 볼륨 정보가 있다 = 무언가 마운트되어 있음
+
+
+def _looks_like_stale_placeholder_tree(point: str) -> bool:
+    """구버전 온디맨드가 남긴 잔재인지 판별한다 — 실데이터 삭제를 막는 안전장치.
+    잔재는 (a) 클라우드 플레이스홀더(재파스 포인트)이거나 (b) desktop.ini 뿐이거나
+    (c) 내용이 0바이트인 항목들이다. 하나라도 실제 내용이 있는 파일이 보이면 False."""
+    FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+    real_bytes = 0
     try:
-        os.listdir(point.rstrip("\\") + "\\")
-        return True
+        for root, _dirs, files in os.walk(point):
+            for n in files:
+                if n.lower() == "desktop.ini":
+                    continue
+                p = os.path.join(root, n)
+                try:
+                    st = os.lstat(p)
+                except OSError:
+                    return False               # 확인 불가 → 건드리지 않는다
+                if st.st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+                    continue                   # 온디맨드 플레이스홀더
+                real_bytes += st.st_size
+                if real_bytes > 0:
+                    return False               # 실제 데이터가 있다 → 잔재 아님
     except OSError:
         return False
+    return True
 
 
 def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
@@ -154,7 +203,16 @@ def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
         try:
             os.rmdir(point)                       # 비어 있을 때만 성공 — 내용 보호
         except OSError:
-            pass
+            # 비어 있지 않다 = 구버전 온디맨드가 남긴 플레이스홀더 잔재일 가능성이 크다.
+            # 그대로 두면 rclone 이 마운트하지 못하고, 사용자는 죽은 로컬 폴더를 보게 된다.
+            # 실제 데이터가 아닌 잔재일 때만(플레이스홀더/빈 파일) 치운다.
+            if _looks_like_stale_placeholder_tree(point):
+                import shutil
+                shutil.rmtree(point, ignore_errors=True)
+            if os.path.isdir(point):
+                raise RuntimeError(
+                    f"마운트 지점에 폴더가 남아 있어 연결할 수 없습니다:\n{point}\n\n"
+                    "그 폴더의 내용을 확인해 옮기거나 지운 뒤 다시 시도하세요.")
     rc = rclone_path()
     args = [rc, "mount", f"{REMOTE}:", point,
             "--volname", volname,
@@ -170,10 +228,41 @@ def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
     raise RuntimeError(f"{point} 마운트가 시간 안에 준비되지 않았습니다.")
 
 
-def unmount(point: str):
-    """마운트 해제 (rclone 프로세스 종료)."""
+def _our_rclone_pids(point: str) -> list[int]:
+    """이 마운트 지점을 서비스 중인 rclone 프로세스 PID 목록.
+    사용자의 다른 rclone 작업(백업·다른 마운트)을 건드리지 않기 위해 명령줄로 가린다."""
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='rclone.exe'\" | "
+          "ForEach-Object { \"$($_.ProcessId)|$($_.CommandLine)\" }")
+    r = _run(["powershell.exe", "-NoProfile", "-Command", ps], timeout=30)
+    pids = []
+    needle = os.path.normcase(point.rstrip("\\"))
+    for line in (r.stdout or "").splitlines():
+        pid, _, cmd = line.partition("|")
+        if not pid.strip().isdigit() or not cmd:
+            continue
+        if needle in os.path.normcase(cmd) and " mount " in cmd:
+            pids.append(int(pid.strip()))
+    return pids
+
+
+def unmount(point: str, timeout: float = 15.0):
+    """이 마운트만 해제한다. 먼저 정상 종료를 시도해 쓰기 버퍼를 비울 기회를 준다
+    (--vfs-cache-mode writes 라 강제 종료하면 아직 안 올라간 파일이 사라진다)."""
     point = point.rstrip("\\")
-    _run(["taskkill", "/F", "/IM", "rclone.exe"], timeout=20)
+    if not is_mounted(point):
+        return True
+    pids = _our_rclone_pids(point)
+    if not pids:
+        return not is_mounted(point)
+    for pid in pids:                       # 1차: 정상 종료 요청(버퍼 플러시)
+        _run(["taskkill", "/PID", str(pid)], timeout=20)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not is_mounted(point):
+            return True
+        time.sleep(0.25)
+    for pid in pids:                       # 2차: 그래도 안 내려가면 강제
+        _run(["taskkill", "/F", "/PID", str(pid)], timeout=20)
     for _ in range(20):
         if not is_mounted(point):
             return True

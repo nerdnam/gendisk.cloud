@@ -107,28 +107,41 @@ class FtpDriveClient:
         attempts = 3
         for attempt in range(1, attempts + 1):
             ftp = self._acquire()
+            released = False
             try:
                 out = fn(ftp)
             except _Truncated:
                 self._release(ftp, dirty=True)    # 전송 중단 — 제어 연결 폐기, 데이터는 유효
+                released = True
                 raise
             except ftplib.error_temp:
                 self._release(ftp, dirty=True)    # 421 혼잡 등 — 잠시 쉬었다 재시도
+                released = True
                 if attempt == attempts:
                     raise
                 time.sleep(0.5 * attempt)
                 continue
             except ftplib.error_perm:
                 self._release(ftp)                # 프로토콜은 정상 — 연결 재사용
+                released = True
                 raise
             except (OSError, EOFError, ftplib.Error):
                 self._release(ftp, dirty=True)
+                released = True
                 if attempt == attempts:
                     raise
                 time.sleep(0.2 * attempt)
                 continue
-            self._release(ftp)
-            return out
+            else:
+                self._release(ftp)                # 정상 종료 — 연결을 풀에 되돌린다
+                released = True
+                return out
+            finally:
+                # 위에서 열거하지 않은 예외(예: 파일명에 개행 → ftplib 의 ValueError,
+                # 호출자 progress 콜백 오류)로 빠져나가도 슬롯·연결이 새지 않게 한다.
+                # 슬롯이 새면 8회 만에 드라이브 전체가 멈추고 재시작 전까지 복구 불가였다.
+                if not released:
+                    self._release(ftp, dirty=True)
 
     # ---------- 경로 ----------
     @staticmethod
@@ -227,7 +240,14 @@ class FtpDriveClient:
             raise OSError(f"FTP 다운로드 실패({target}): {e}")
 
     def put_smart(self, space: str, path: str, local_path, progress=None) -> None:
+        """업로드. 임시 이름으로 올린 뒤 최종 이름으로 바꾼다(원자적 교체).
+
+        STOR 는 대상 파일을 즉시 비우므로, 곧바로 최종 경로에 쓰면 전송이 중간에
+        끊겼을 때 서버의 멀쩡한 원본이 잘린 파일로 파괴된다(재시도까지 겹치면 확실).
+        임시 파일로 받고 성공했을 때만 교체해 원본을 지킨다."""
         target = self._p(space, path)
+        base, _, name = target.rpartition("/")
+        tmp = f"{base}/.gendisk-upload-{os.getpid()}-{id(local_path) & 0xFFFF}-{name}"
         total = os.path.getsize(local_path)
         done = 0
 
@@ -241,11 +261,31 @@ class FtpDriveClient:
                     done += len(block)
                     if progress:
                         progress(done, total)
-                ftp.storbinary(f"STOR {target}", f, blocksize=_BLOCK, callback=cb)
+                ftp.storbinary(f"STOR {tmp}", f, blocksize=_BLOCK, callback=cb)
+
+        def commit(ftp):
+            try:
+                ftp.delete(target)       # RNTO 는 기존 파일을 덮지 못하는 서버가 있다
+            except ftplib.error_perm:
+                pass                     # 없으면 그대로 진행
+            ftp.rename(tmp, target)
+
         try:
             self._run(go)
+        except Exception:
+            self._cleanup_tmp(tmp)       # 실패 잔재 정리 — 원본은 그대로 살아 있다
+            raise
+        try:
+            self._run(commit)
         except ftplib.error_perm as e:
-            raise OSError(f"FTP 업로드 실패({target}): {e}")
+            self._cleanup_tmp(tmp)
+            raise OSError(f"FTP 업로드 마무리 실패({target}): {e}")
+
+    def _cleanup_tmp(self, tmp: str):
+        try:
+            self._run(lambda ftp: ftp.delete(tmp))
+        except Exception:                # noqa: BLE001 (정리는 best-effort)
+            pass
 
     def delete(self, space: str, path: str) -> None:
         target = self._p(space, path)

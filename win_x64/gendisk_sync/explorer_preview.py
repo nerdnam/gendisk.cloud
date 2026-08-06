@@ -97,17 +97,17 @@ def disable() -> bool:
 
 def restore() -> bool:
     """끄기 전 상태로 되돌린다. 백업이 없으면 기본값(켬)으로."""
-    if _get(_BACKUP, "saved") == 1:
-        icons = _get(_BACKUP, "IconsOnly")
-        pane = _get(_BACKUP, "NoPreviewPane")
-        _set(_ADVANCED, "IconsOnly",
-             icons if _get(_BACKUP, "IconsOnlyExisted") == 1 else None)
-        _set(_POLICIES, "NoPreviewPane",
-             pane if _get(_BACKUP, "NoPreviewPaneExisted") == 1 else None,
-             required=False)
-        _set(_BACKUP, "saved", 0)
-    else:
-        _set(_ADVANCED, "IconsOnly", 0)
-        _set(_POLICIES, "NoPreviewPane", None, required=False)
+    if _get(_BACKUP, "saved") != 1:
+        # 우리가 끈 적이 없다 = 사용자가 원래부터 그렇게 쓰고 있다.
+        # 여기서 임의로 켜면 사용자의 선택(폴더 옵션에서 직접 끔)을 뒤집게 된다.
+        return False
+    icons = _get(_BACKUP, "IconsOnly")
+    pane = _get(_BACKUP, "NoPreviewPane")
+    _set(_ADVANCED, "IconsOnly",
+         icons if _get(_BACKUP, "IconsOnlyExisted") == 1 else None)
+    _set(_POLICIES, "NoPreviewPane",
+         pane if _get(_BACKUP, "NoPreviewPaneExisted") == 1 else None,
+         required=False)
+    _set(_BACKUP, "saved", 0)
     _notify_explorer()
     return True

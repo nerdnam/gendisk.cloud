@@ -14,6 +14,7 @@ GENDISK_FTP_PORT 환경변수를 설정하면 켜진다(기본 꺼짐). 웹/WebD
 연결해야 한다(포트포워딩/VPN). 평문 FTP는 자격증명이 그대로 노출되므로
 인터넷에 여는 경우 TLS(FTPS) 사용을 권장한다.
 """
+import errno
 import logging
 import os
 import threading
@@ -46,7 +47,12 @@ def _build_spaces(user: dict) -> dict[str, str]:
     """가상 루트에 보일 {이름: 실제경로}. WebDAV(/dav)와 같은 구성."""
     spaces = {HOME_SPACE: str(user_root(user).resolve())}
     for m in accessible_mounts(user):
-        spaces[m.name] = str(m.resolve())
+        name = m.name
+        if name == HOME_SPACE:
+            # 'home' 이름의 외부 마운트가 개인 저장소를 덮어쓰면 웹/WebDAV 와
+            # 서로 다른 곳을 가리키게 된다(변경 알림의 private 판정도 틀어짐).
+            name = f"{name} (mount)"
+        spaces[name] = str(m.resolve())
     return spaces
 
 
@@ -117,6 +123,26 @@ class GenDiskAuthorizer:
         return self._sessions.get(username)
 
 
+class _QuotaWriter:
+    """용량 제한을 넘어서면 쓰기를 중단시키는 파일 래퍼.
+    남은 용량을 초과하는 순간 OSError(ENOSPC) 를 내 전송을 끊는다
+    (pyftpdlib 가 552 로 응답하고, 부분 파일은 서버가 정리한다)."""
+
+    def __init__(self, f, remaining: int):
+        self._f = f
+        self._remaining = remaining
+
+    def write(self, data):
+        n = len(data)
+        if n > self._remaining:
+            raise OSError(errno.ENOSPC, "저장 공간 제한을 초과했습니다")
+        self._remaining -= n
+        return self._f.write(data)
+
+    def __getattr__(self, name):        # close/flush/name/fileno 등은 그대로 위임
+        return getattr(self._f, name)
+
+
 def _make_fs_class():
     """AbstractedFS 서브클래스 — 가상 루트('/') 아래에 공간들을 폴더로 매핑."""
     from pyftpdlib.filesystems import AbstractedFS
@@ -185,6 +211,22 @@ def _make_fs_class():
         def islink(self, path):
             return super().islink(self._remap(path))
 
+        # ---- 업로드: 용량 제한을 전송 중에도 지킨다 ----
+        def open(self, filename, mode):
+            f = super().open(filename, mode)
+            if "w" not in mode and "a" not in mode:
+                return f
+            root = self._spaces.get(HOME_SPACE)
+            if not root or not _norm(filename).startswith(_norm(root) + os.sep):
+                return f                       # 개인 저장소가 아니면 용량 제한 없음
+            quota = user_quota(self._user["id"])
+            if quota <= 0:
+                return f
+            used = dir_size(root)
+            # has_perm 은 STOR 시작 시점에 한 번만 보므로, 한 번의 큰 업로드로는
+            # 제한을 무한히 넘길 수 있었다. 쓰는 동안 계속 확인해 초과 시 끊는다.
+            return _QuotaWriter(f, remaining=max(0, quota - used))
+
         # ---- 변경 이벤트 (웹/동기화 클라이언트 실시간 반영) ----
         def _notify(self, real, gone: bool = False):
             try:
@@ -199,20 +241,36 @@ def _make_fs_class():
             except Exception:                              # 알림 실패가 FTP 동작을 막지 않게
                 log.debug("notify failed", exc_info=True)
 
+        def _drop_shares(self, real):
+            """사라진 경로에 걸린 공개 공유 링크를 해제한다 — files.py 와 같은 규칙.
+            안 하면 그 토큰이 나중에 같은 경로의 '다른 파일'을 서빙하게 된다."""
+            try:
+                from . import shares
+                v = self.fs2ftp(real)                    # "/<space>/<rel>"
+                parts = [p for p in v.split("/") if p]
+                if not parts:
+                    return
+                shares.drop_shares_for(self._user["id"], parts[0], "/".join(parts[1:]))
+            except Exception:                      # noqa: BLE001 (공유 정리 실패가 FTP 를 막지 않게)
+                log.debug("drop_shares failed", exc_info=True)
+
         def mkdir(self, path):
             super().mkdir(path)
             self._notify(path)
 
         def rmdir(self, path):
             super().rmdir(path)
+            self._drop_shares(path)
             self._notify(path, gone=True)
 
         def remove(self, path):
             super().remove(path)
+            self._drop_shares(path)
             self._notify(path, gone=True)
 
         def rename(self, src, dst):
             super().rename(src, dst)
+            self._drop_shares(src)
             self._notify(src, gone=True)
             self._notify(dst)
 
@@ -232,6 +290,15 @@ def _make_handler_class(tls_cert: str | None, tls_key: str | None):
             fs = getattr(self, "fs", None)
             if fs is not None:
                 fs._notify(file)
+
+        def on_incomplete_file_received(self, file):
+            """중단된 업로드(연결 끊김·용량 초과)의 부분 파일을 지운다.
+            그대로 두면 반쪽짜리 파일이 남아 용량을 잡아먹고, 사용자에겐 정상
+            파일처럼 보인다."""
+            try:
+                os.remove(file)
+            except OSError:
+                pass
 
     if tls_cert and tls_key:
         Handler.certfile = tls_cert
@@ -253,8 +320,21 @@ def _parse_ports(spec: str) -> range | None:
 
 
 def maybe_start() -> threading.Thread | None:
-    """GENDISK_FTP_PORT 가 설정돼 있으면 FTP 서버를 데몬 스레드로 띄운다."""
-    port = int(os.environ.get("GENDISK_FTP_PORT", "0") or 0)
+    """GENDISK_FTP_PORT 가 설정돼 있으면 FTP 서버를 데몬 스레드로 띄운다.
+    무슨 문제가 있어도 FTP 만 꺼질 뿐, 웹/API 서버는 계속 뜬다."""
+    try:
+        return _start()
+    except Exception:                # noqa: BLE001
+        log.exception("FTP 서버를 시작하지 못했습니다 — FTP 없이 계속합니다")
+        return None
+
+
+def _start() -> threading.Thread | None:
+    try:
+        port = int(os.environ.get("GENDISK_FTP_PORT", "0") or 0)
+    except ValueError:
+        log.error("GENDISK_FTP_PORT 값이 숫자가 아닙니다 — FTP 비활성")
+        return None
     if not port:
         return None
     try:
