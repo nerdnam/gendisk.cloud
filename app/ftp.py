@@ -38,6 +38,9 @@ _VROOT = str(DATA_DIR / "ftproot")
 
 _WRITE_PERMS = "adfmwMT"          # 쓰기 계열 권한 문자 (d=삭제 f=이름변경 m=폴더 w=업로드 …)
 
+#: 가상 루트에서만 예외적으로 쓰기를 허용하는 셸 파일 (탐색기·Finder 가 자동 생성)
+_SHELL_FILES = {"desktop.ini", ".ds_store", "thumbs.db"}
+
 
 def _norm(p: str) -> str:
     return os.path.normcase(os.path.normpath(p))
@@ -88,7 +91,13 @@ class GenDiskAuthorizer:
         user, spaces = entry
         p = _norm(path)
         if p == _norm(_VROOT):
-            return False                     # 가상 루트 직접 조작 금지
+            return False                     # 가상 루트 자체 조작 금지
+        # 가상 루트 바로 아래의 '셸 파일'만 허용한다. 탐색기·Finder 는 폴더를 열 때
+        # desktop.ini/.DS_Store 를 쓰는데, 막으면 클라이언트에 오류가 뜨고 rclone
+        # 캐시에 영영 갇힌다. 이름을 한정해 루트가 임의 파일 저장소가 되지 않게 한다.
+        # (이 파일들은 listdir 이 저장소만 돌려주므로 사용자에게 보이지 않는다.)
+        if os.path.dirname(p) == _norm(_VROOT):
+            return os.path.basename(p).lower() in _SHELL_FILES
         for name, root in spaces.items():
             nroot = _norm(root)
             if p == nroot:
@@ -181,6 +190,9 @@ def _make_fs_class():
         def validpath(self, path):
             p = _norm(path)
             if p == _norm(self._root):
+                return True
+            # 가상 루트 바로 아래(셸 파일 desktop.ini 등) — has_perm 이 쓰기를 통제한다
+            if os.path.dirname(p) == _norm(self._root):
                 return True
             for root in self._spaces.values():
                 nroot = _norm(root)

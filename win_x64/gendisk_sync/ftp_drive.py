@@ -39,6 +39,24 @@ def rclone_path() -> str | None:
     return None
 
 
+def log_path() -> str:
+    """rclone 로그 파일 경로 (%LOCALAPPDATA%\\genDISK\\rclone.log).
+    마운트가 예고 없이 끊겼을 때 원인을 볼 수 있는 유일한 기록이다."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "genDISK")
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, "rclone.log")
+    try:                       # 무한히 커지지 않게 8MB 넘으면 한 번 밀어낸다
+        if os.path.getsize(p) > 8 * 1024 * 1024:
+            old = p + ".1"
+            if os.path.exists(old):
+                os.remove(old)
+            os.replace(p, old)
+    except OSError:
+        pass
+    return p
+
+
 def winfsp_installed() -> bool:
     for p in (r"C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll",
               r"C:\Program Files\WinFsp\bin\winfsp-x64.dll"):
@@ -218,6 +236,8 @@ def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
             "--volname", volname,
             "--vfs-cache-mode", "writes",  # 쓰기만 임시 버퍼 — 목록·읽기는 서버 직결
             "--dir-cache-time", "10s",   # 폴더 목록 캐시 짧게 → 항상 최신에 가깝게
+            # 마운트가 조용히 죽으면 원인을 알 길이 없었다 — 로그를 파일로 남긴다.
+            "--log-file", log_path(), "--log-level", "INFO",
             "--no-console"]
     subprocess.Popen(args, creationflags=_NOWINDOW)
     deadline = time.monotonic() + timeout
