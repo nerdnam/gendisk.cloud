@@ -236,6 +236,14 @@ def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
             "--volname", volname,
             "--vfs-cache-mode", "writes",  # 쓰기만 임시 버퍼 — 목록·읽기는 서버 직결
             "--dir-cache-time", "10s",   # 폴더 목록 캐시 짧게 → 항상 최신에 가깝게
+            # 연결이 끊겨도 탐색기에 'I/O 장치 오류'로 튀지 않게 충분히 재시도한다.
+            # (VPN·무선 전환처럼 경로가 흔들리면 TCP 가 통째로 끊기는데, 기본
+            #  재시도 횟수로는 그 순간 열람이 그대로 실패로 보였다.)
+            "--low-level-retries", "20",
+            "--retries", "10",
+            "--timeout", "60s",
+            "--contimeout", "20s",
+            "--ftp-close-timeout", "10s",
             # 마운트가 조용히 죽으면 원인을 알 길이 없었다 — 로그를 파일로 남긴다.
             "--log-file", log_path(), "--log-level", "INFO",
             "--no-console"]
