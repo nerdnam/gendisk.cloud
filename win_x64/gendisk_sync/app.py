@@ -6,6 +6,7 @@ customtkinter로 macOS 스타일(둥근 카드·토글 스위치·플랫 강조 
 드라이브 자동 연결 → 자동 동기화까지 수행한다.
 """
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from urllib.parse import urlsplit
@@ -1116,13 +1117,48 @@ class App:
                         self.log(f"미리 보기 끄기 실패(무시): {e}")
                 self.set_status("genDISK Drive 연결됨 (FTP)", SUCCESS)
                 self.log("genDISK Drive 를 연결했습니다 — 탐색기 사이드바에서 확인하세요.")
+                self._start_ftp_watchdog(point)
             except Exception as e:  # noqa: BLE001
                 self.set_status("FTP 드라이브 연결 실패", DANGER)
                 self.log(f"FTP 드라이브 연결 실패: {e}")
         threading.Thread(target=work, daemon=True).start()
 
+    def _start_ftp_watchdog(self, point: str):
+        """마운트 생존 감시 — rclone 이 예고 없이 죽어도 상태는 '연결됨'으로 남아
+        사이드바 노드만 사라지는 문제가 있었다. 30초마다 확인해 끊겼으면 자동
+        재마운트하고, 반복 실패하면 상태를 바꿔 사용자가 알게 한다."""
+        self._ftp_watch_gen = getattr(self, "_ftp_watch_gen", 0) + 1
+        gen = self._ftp_watch_gen
+
+        def watch():
+            from . import ftp_drive
+            fails = 0
+            while True:
+                time.sleep(30)
+                if gen != self._ftp_watch_gen or not self.cfg.ftp_drive_enabled:
+                    return                     # 해제됐거나 새 감시로 교체됨
+                if ftp_drive.is_mounted(point):
+                    fails = 0
+                    continue
+                self.log("genDISK Drive 마운트가 끊겼습니다 — 자동으로 다시 연결합니다.")
+                try:
+                    ftp_drive.mount(point)
+                    self.set_status("genDISK Drive 연결됨 (FTP)", SUCCESS)
+                    self.log("genDISK Drive 를 다시 연결했습니다.")
+                    fails = 0
+                except Exception as e:  # noqa: BLE001
+                    fails += 1
+                    self.set_status("FTP 드라이브 연결 실패", DANGER)
+                    self.log(f"자동 재연결 실패({fails}회): {e}")
+                    if fails >= 3:
+                        self.log("자동 재연결을 멈춥니다 — '다시 연결'을 눌러 주세요.")
+                        return
+        threading.Thread(target=watch, daemon=True).start()
+
     def _unmount_ftp_drive(self):
         from . import explorer_preview, ftp_drive, navdrive
+        # 감시 중단 — 사용자가 해제한 마운트를 워치독이 도로 붙이면 안 된다
+        self._ftp_watch_gen = getattr(self, "_ftp_watch_gen", 0) + 1
         point = self.cfg.ftp_mount_path()
         try:
             navdrive.unregister_drive()
