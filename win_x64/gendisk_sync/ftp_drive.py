@@ -204,6 +204,20 @@ def _looks_like_stale_placeholder_tree(point: str) -> bool:
     return True
 
 
+def _unregister_stale_sync_root(point: str) -> bool:
+    """구버전 온디맨드(Cloud Files) 드라이브가 남긴 sync root 등록을 푼다.
+
+    등록만 남고 provider 가 없으면 폴더가 비어 있어도 열람·삭제가 전부
+    'cloud file provider is not running' 으로 실패해 rmdir 가 통하지 않는다.
+    등록을 풀면 일반 폴더로 돌아온다. sync root 가 아니면 그냥 실패(무해)."""
+    import ctypes
+    try:
+        hr = ctypes.windll.cldapi.CfUnregisterSyncRoot(ctypes.c_wchar_p(point))
+        return hr == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
     """마운트 지점에 서버를 연결한다.
 
@@ -224,9 +238,26 @@ def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
             # 비어 있지 않다 = 구버전 온디맨드가 남긴 플레이스홀더 잔재일 가능성이 크다.
             # 그대로 두면 rclone 이 마운트하지 못하고, 사용자는 죽은 로컬 폴더를 보게 된다.
             # 실제 데이터가 아닌 잔재일 때만(플레이스홀더/빈 파일) 치운다.
-            if _looks_like_stale_placeholder_tree(point):
+            if _unregister_stale_sync_root(point):
+                try:
+                    os.rmdir(point)               # 등록이 풀리면 빈 폴더는 이제 지워진다
+                except OSError:
+                    pass
+            stale = os.path.isdir(point) and _looks_like_stale_placeholder_tree(point)
+            if stale:
                 import shutil
                 shutil.rmtree(point, ignore_errors=True)
+            if stale and os.path.isdir(point):
+                # 메타데이터가 손상된 플레이스홀더는 삭제 자체가 거부되기도 한다.
+                # 잔재로 판정된 경우에 한해 옆으로 치워 지점을 비운다(실데이터면 여기 안 옴).
+                for i in range(100):
+                    cand = f"{point}.old-leftover" + (f"-{i}" if i else "")
+                    if not os.path.exists(cand):
+                        try:
+                            os.rename(point, cand)
+                        except OSError:
+                            pass
+                        break
             if os.path.isdir(point):
                 raise RuntimeError(
                     f"마운트 지점에 폴더가 남아 있어 연결할 수 없습니다:\n{point}\n\n"
