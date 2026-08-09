@@ -153,6 +153,8 @@ class App:
         # 저장된 일반 WebDAV 연결 중 '자동 연결' 항목을 시작 시 마운트 (genDISK 로그인과 무관)
         if any(m.get("auto") for m in self.cfg.webdav_mounts):
             threading.Thread(target=self._auto_connect_webdav_mounts, daemon=True).start()
+        # GitHub 최신 릴리스 확인 → 새 버전이면 물어보고 자체 업데이트
+        threading.Thread(target=self._check_update_async, daemon=True).start()
         # 닫기(X)는 트레이가 있으면 트레이로 숨기고, 없으면 그냥 종료
         self.root.protocol("WM_DELETE_WINDOW",
                            self._hide_to_tray if self.tray else self._real_quit)
@@ -1154,6 +1156,42 @@ class App:
                         self.log("자동 재연결을 멈춥니다 — '다시 연결'을 눌러 주세요.")
                         return
         threading.Thread(target=watch, daemon=True).start()
+
+    # ---------- 자동 업데이트 (GitHub Releases) ----------
+    def _check_update_async(self):
+        """시작 시 백그라운드로 최신 릴리스를 확인한다. 새 버전이면 사용자에게
+        묻고, 동의하면 내려받아 exe 를 교체한 뒤 앱을 재시작한다."""
+        from . import __version__, updater
+        updater.cleanup_old()            # 이전 업데이트 잔재(<exe>.old) 정리
+        try:
+            upd = updater.check()
+        except Exception:  # noqa: BLE001 (오프라인·레이트리밋 등 — 조용히 넘어간다)
+            return
+        if not upd:
+            return
+        ver, url, size = upd
+        self.log(f"새 버전 v{ver} 이(가) 있습니다 (현재 v{__version__}).")
+
+        def do_update():
+            self.set_status("업데이트 다운로드 중…", MUTED)
+            try:
+                updater.apply(url, size, log=self.log)
+            except Exception as e:  # noqa: BLE001
+                self.set_status("업데이트 실패", DANGER)
+                self.log(f"업데이트 실패: {e}")
+                return
+            self.log("업데이트를 적용했습니다 — 앱을 다시 시작합니다.")
+            self.root.after(0, self._real_quit)
+
+        def ask():
+            if messagebox.askyesno(
+                    "업데이트",
+                    f"새 버전 v{ver}이(가) 나왔습니다.\n"
+                    "지금 업데이트할까요? (다운로드 후 자동으로 다시 시작됩니다)"):
+                threading.Thread(target=do_update, daemon=True).start()
+            else:
+                self.log("업데이트를 건너뛰었습니다 — 다음 실행 때 다시 확인합니다.")
+        self.root.after(0, ask)
 
     def _unmount_ftp_drive(self):
         from . import explorer_preview, ftp_drive, navdrive
