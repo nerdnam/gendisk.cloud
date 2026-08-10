@@ -331,8 +331,10 @@ def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
             # 폴더 하나 여는 데 FTP 연결 8개가 모두 묶이고 화면이 멈췄다.
             # full 모드 + 용량·기간 상한으로 '한 번 받은 것만' 잠시 재사용한다.
             "--vfs-cache-mode", "full",
-            "--vfs-cache-max-size", "2G",
-            "--vfs-cache-max-age", "24h",
+            "--vfs-cache-max-size", "20G",
+            "--vfs-cache-max-age", "168h",       # 7일 — 어제 본 폴더를 다시 안 받게
+            # 상한과 별개로 디스크 여유가 이 아래로 떨어지면 캐시를 비운다(디스크 보호)
+            "--vfs-cache-min-free-space", "20G",
             # 썸네일은 파일 앞부분만 읽는다. 기본 청크가 128M 이라 큰 동영상까지
             # 통째로 받아왔다 — 작게 시작해 필요할 때만 키운다.
             "--vfs-read-chunk-size", "1M",
