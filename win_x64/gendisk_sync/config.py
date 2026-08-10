@@ -65,6 +65,15 @@ class Config:
     # 탐색기 사이드바의 'genDISK Drive' 항목이 이 폴더를 가리킨다.
     ftp_mount_point: str = ""
 
+    def ftp_host_resolved(self) -> str:
+        """접속할 FTP 호스트. ftp_host 가 비어 있으면 server_url(ftp://host:port)에서 뽑는다.
+        설정 화면을 한 번도 안 연 상태에서 _collect() 가 빈 입력칸으로 ftp_host 를 덮어써
+        재연결이 통째로 실패하던 문제가 있었다."""
+        if self.ftp_host:
+            return self.ftp_host
+        import urllib.parse
+        return urllib.parse.urlsplit(self.server_url).hostname or ""
+
     def ftp_mount_path(self) -> str:
         import os
         return self.ftp_mount_point or os.path.expandvars(r"%USERPROFILE%\genDISK")

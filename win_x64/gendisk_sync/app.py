@@ -348,7 +348,7 @@ class App:
         self.seg_login_mode.pack(pady=(0, 14))
 
         self.e_url = ctk.CTkEntry(pad, width=320,
-                                  placeholder_text="서버 주소 (예: ftp.pureluv.co:2121)")
+                                  placeholder_text="서버 주소 (예: ftp.example.com:2121)")
         self.e_url.pack(pady=4)
         if self.cfg.server_url:  # 빈 값 insert는 placeholder를 없애므로 값이 있을 때만
             self.e_url.insert(0, self.cfg.server_url)
@@ -409,7 +409,7 @@ class App:
             if not cur and self.cfg.server_url:
                 self.e_url.insert(0, self.cfg.server_url)
             self.lbl_login_subtitle.configure(text="로그인하고 파일을 동기화·연결하세요")
-            self.e_url.configure(placeholder_text="서버 주소 (예: ftp.pureluv.co:2121)")
+            self.e_url.configure(placeholder_text="서버 주소 (예: ftp.example.com:2121)")
             self.frm_login_drive.pack_forget()
             self.frm_login_profiles.pack_forget()
             self.btn_login.configure(text="로그인")
@@ -584,7 +584,7 @@ class App:
         frow.pack(fill="x", pady=(4, 0))
         self._field_label(frow, "FTP 호스트").pack(side="left")
         self.e_ftp_host = ctk.CTkEntry(frow, width=180,
-                                       placeholder_text="예: ftp.pureluv.co")
+                                       placeholder_text="예: ftp.example.com")
         if getattr(self.cfg, "ftp_host", ""):
             self.e_ftp_host.insert(0, self.cfg.ftp_host)
         self.e_ftp_host.pack(side="left", padx=(8, 0))
@@ -1095,7 +1095,7 @@ class App:
                         self.log(err)
                         self.root.after(0, lambda: messagebox.showerror("설치 실패", err))
                         return
-                ftp_drive.configure(cfg.ftp_host, cfg.ftp_port, cfg.username, pw,
+                ftp_drive.configure(cfg.ftp_host_resolved(), cfg.ftp_port, cfg.username, pw,
                                     tls=bool(getattr(cfg, "ftp_tls", False)))
                 ftp_drive.mount(point)
                 # 드라이브 문자를 만들지 않고, 탐색기 사이드바의 'genDISK Drive'
@@ -1135,26 +1135,36 @@ class App:
         def watch():
             from . import ftp_drive
             fails = 0
+            wait = 30
             while True:
-                time.sleep(30)
+                time.sleep(wait)
                 if gen != self._ftp_watch_gen or not self.cfg.ftp_drive_enabled:
                     return                     # 해제됐거나 새 감시로 교체됨
                 if ftp_drive.is_mounted(point):
-                    fails = 0
+                    if fails:
+                        self.set_status("genDISK Drive 연결됨 (FTP)", SUCCESS)
+                    fails, wait = 0, 30
                     continue
                 self.log("genDISK Drive 마운트가 끊겼습니다 — 자동으로 다시 연결합니다.")
                 try:
+                    cfg = self.cfg
+                    pw = self._pw or cfg.get_password()
+                    if not pw:
+                        raise RuntimeError("저장된 로그인 정보가 없습니다")
+                    # 네트워크가 바뀌었을 수 있으니 접속 정보도 다시 반영한다
+                    ftp_drive.configure(cfg.ftp_host_resolved(), cfg.ftp_port, cfg.username, pw,
+                                        tls=bool(getattr(cfg, "ftp_tls", False)))
                     ftp_drive.mount(point)
                     self.set_status("genDISK Drive 연결됨 (FTP)", SUCCESS)
                     self.log("genDISK Drive 를 다시 연결했습니다.")
-                    fails = 0
-                except Exception as e:  # noqa: BLE001
+                    fails, wait = 0, 30
+                except Exception as e:  # noqa: BLE001 (감시는 절대 죽지 않아야 한다)
                     fails += 1
-                    self.set_status("FTP 드라이브 연결 실패", DANGER)
-                    self.log(f"자동 재연결 실패({fails}회): {e}")
-                    if fails >= 3:
-                        self.log("자동 재연결을 멈춥니다 — '다시 연결'을 눌러 주세요.")
-                        return
+                    # 예전에는 3회 실패하면 영구히 포기해, 잠깐 끊겼다 돌아온 뒤에도
+                    # 사람이 '다시 연결'을 눌러야 했다. 이제는 간격만 늘리며 계속 살핀다.
+                    wait = min(wait * 2, 300)
+                    self.set_status(f"genDISK Drive 재연결 대기 중 ({wait}초)", DANGER)
+                    self.log(f"자동 재연결 실패({fails}회, {wait}초 후 재시도): {e}")
         threading.Thread(target=watch, daemon=True).start()
 
     # ---------- 자동 업데이트 (GitHub Releases) ----------
@@ -1239,7 +1249,9 @@ class App:
     def _toggle_ftp_transport(self):
         """드라이브 파일 전송을 API(HTTPS) ↔ FTP 로 전환 — 저장하고, 켜져 있으면 재연결."""
         self.cfg.vfs_transport = "ftp" if self.var_ftp.get() else "api"
-        self.cfg.ftp_host = self.e_ftp_host.get().strip()
+        _h = self.e_ftp_host.get().strip()
+        if _h:                      # 비어 있으면 기존 값을 지우지 않는다
+            self.cfg.ftp_host = _h
         try:
             self.cfg.ftp_port = int(self.e_ftp_port.get().strip() or 2121)
         except ValueError:
@@ -1381,7 +1393,9 @@ class App:
         except ValueError:
             self.cfg.interval_sec = 30
         self.cfg.enabled = self.var_enabled.get()
-        self.cfg.ftp_host = self.e_ftp_host.get().strip()
+        _h = self.e_ftp_host.get().strip()
+        if _h:                      # 비어 있으면 기존 값을 지우지 않는다
+            self.cfg.ftp_host = _h
         try:
             self.cfg.ftp_port = int(self.e_ftp_port.get().strip() or 2121)
         except ValueError:
