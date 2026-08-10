@@ -101,10 +101,13 @@ class FtpDriveClient:
                 self._close_quiet(ftp)
             self._pool.clear()
 
-    def _run(self, fn):
+    def _run(self, fn, attempts: int = 3):
         """풀에서 연결을 빌려 fn(ftp) 실행. 끊긴 연결·일시 오류(421 등)는
-        짧은 백오프 후 새 연결로 재시도한다 (VPN 순단·서버 혼잡 내성)."""
-        attempts = 3
+        짧은 백오프 후 새 연결로 재시도한다 (VPN 순단·서버 혼잡 내성).
+
+        attempts=1 로 부르면 재시도하지 않는다 — 삭제·이름변경처럼 **다시 실행하면
+        안 되는(비멱등)** 작업에 쓴다. 응답만 유실되고 서버에서는 이미 성공한 경우,
+        재실행이 방금 만든 결과를 지워버리기 때문이다."""
         for attempt in range(1, attempts + 1):
             ftp = self._acquire()
             released = False
@@ -276,7 +279,7 @@ class FtpDriveClient:
             self._cleanup_tmp(tmp)       # 실패 잔재 정리 — 원본은 그대로 살아 있다
             raise
         try:
-            self._run(commit)
+            self._run(commit, attempts=1)   # DELE+RNTO 는 재실행 금지
         except ftplib.error_perm as e:
             self._cleanup_tmp(tmp)
             raise OSError(f"FTP 업로드 마무리 실패({target}): {e}")
@@ -326,7 +329,7 @@ class FtpDriveClient:
             ftp.rename(f, t)
             return {}
         try:
-            return self._run(go)
+            return self._run(go, attempts=1)   # 이름변경은 재실행하면 안 된다
         except ftplib.error_perm as e:
             raise OSError(f"FTP 이동 실패({f} → {t}): {e}")
 

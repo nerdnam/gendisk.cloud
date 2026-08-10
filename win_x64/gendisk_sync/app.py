@@ -1062,7 +1062,9 @@ class App:
         로컬에 목록·파일을 저장하지 않으므로 온디맨드 방식의 문제가 없다."""
         cfg = self.cfg
         pw = self._pw or cfg.get_password()
-        if not (cfg.ftp_host and cfg.username and pw):
+        # 게이트도 실사용과 같은 해석값을 봐야 한다. 원본 ftp_host 만 보면, 두 줄 뒤
+        # configure() 는 server_url 에서 뽑아 성공할 상황인데도 스스로 막아버렸다.
+        if not (cfg.ftp_host_resolved() and cfg.username and pw):
             self.log("FTP 드라이브: 로그인 정보가 없어 건너뜁니다.")
             return
 
@@ -1125,6 +1127,8 @@ class App:
                 self.log(f"FTP 드라이브 연결 실패: {e}")
         threading.Thread(target=work, daemon=True).start()
 
+    SICK_LIMIT = 2            # 연속 무응답 N회면 강제 재마운트
+
     def _start_ftp_watchdog(self, point: str):
         """마운트 생존 감시 — rclone 이 예고 없이 죽어도 상태는 '연결됨'으로 남아
         사이드바 노드만 사라지는 문제가 있었다. 30초마다 확인해 끊겼으면 자동
@@ -1136,16 +1140,36 @@ class App:
             from . import ftp_drive
             fails = 0
             wait = 30
+            sick = 0       # 연속 무응답 횟수
             while True:
                 time.sleep(wait)
                 if gen != self._ftp_watch_gen or not self.cfg.ftp_drive_enabled:
                     return                     # 해제됐거나 새 감시로 교체됨
+                # 볼륨 존재 여부만 보면 '프로세스는 살아 있는데 FTP 연결만 죽은' 상태를
+                # 놓친다(실측: 7분 34초 동안 모든 열람이 실패하는데 워치독은 정상 판정).
+                # 그래서 실제로 목록을 읽어 보고, 연속으로 실패할 때만 재마운트한다
+                # (일시적 지연 한 번으로 멀쩡한 마운트를 내리지 않도록).
                 if ftp_drive.is_mounted(point):
-                    if fails:
-                        self.set_status("genDISK Drive 연결됨 (FTP)", SUCCESS)
-                    fails, wait = 0, 30
-                    continue
-                self.log("genDISK Drive 마운트가 끊겼습니다 — 자동으로 다시 연결합니다.")
+                    if ftp_drive.probe(point):
+                        if fails:
+                            self.set_status("genDISK Drive 연결됨 (FTP)", SUCCESS)
+                        fails, wait, sick = 0, 30, 0
+                        continue
+                    sick += 1
+                    self.log(f"genDISK Drive 응답 없음 ({sick}/{self.SICK_LIMIT}) — "
+                             "연결이 끊겼는지 확인 중입니다.")
+                    if sick < self.SICK_LIMIT:
+                        wait = 15              # 의심 구간에서는 더 자주 확인
+                        continue
+                    self.log("genDISK Drive 가 응답하지 않습니다 — 강제로 다시 연결합니다.")
+                    try:
+                        ftp_drive.unmount(point)   # 죽은 rclone 을 확실히 회수
+                    except Exception as e:  # noqa: BLE001
+                        self.log(f"기존 마운트 정리 실패(무시): {e}")
+                    sick = 0
+                else:
+                    sick = 0
+                    self.log("genDISK Drive 마운트가 끊겼습니다 — 자동으로 다시 연결합니다.")
                 try:
                     cfg = self.cfg
                     pw = self._pw or cfg.get_password()

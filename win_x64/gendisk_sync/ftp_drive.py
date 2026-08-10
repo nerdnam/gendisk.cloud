@@ -12,6 +12,7 @@
 """
 import os
 import subprocess
+import threading
 import time
 
 REMOTE = "gendisk"                      # rclone 원격 이름 (앱 전용)
@@ -218,6 +219,32 @@ def _unregister_stale_sync_root(point: str) -> bool:
         return False
 
 
+def probe(point: str, timeout: float = 8.0) -> bool:
+    """마운트가 **실제로 응답하는지** 확인한다.
+
+    is_mounted() 는 볼륨이 존재하는지만 본다. 그런데 실제 장애는 rclone 프로세스가
+    멀쩡한 채 FTP 연결만 죽는 형태였다(끊긴 소켓을 계속 재사용해 모든 요청이 실패).
+    그때도 볼륨은 존재하므로 is_mounted() 는 True 였고 워치독은 몇 분간 아무것도
+    하지 않았다 — 실측 7분 34초. 그래서 목록을 실제로 한 번 읽어 본다.
+
+    os.listdir 이 걸려 돌아오지 않을 수 있으므로 별도 스레드에서 돌리고 기다린다
+    (감시 스레드가 통째로 멈추면 안 된다)."""
+    point = point.rstrip("\\")
+    result = {}
+
+    def work():
+        try:
+            os.listdir(point + "\\")
+            result["ok"] = True
+        except Exception:  # noqa: BLE001
+            result["ok"] = False
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(timeout)
+    return result.get("ok", False)          # 시간 안에 응답 없으면 비정상으로 본다
+
+
 def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
     """마운트 지점에 서버를 연결한다.
 
@@ -266,24 +293,40 @@ def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
     args = [rc, "mount", f"{REMOTE}:", point,
             "--volname", volname,
             "--vfs-cache-mode", "writes",  # 쓰기만 임시 버퍼 — 목록·읽기는 서버 직결
-            "--dir-cache-time", "10s",   # 폴더 목록 캐시 짧게 → 항상 최신에 가깝게
-            # 연결이 끊겨도 탐색기에 'I/O 장치 오류'로 튀지 않게 충분히 재시도한다.
-            # (VPN·무선 전환처럼 경로가 흔들리면 TCP 가 통째로 끊기는데, 기본
-            #  재시도 횟수로는 그 순간 열람이 그대로 실패로 보였다.)
-            "--low-level-retries", "20",
-            "--retries", "10",
-            "--timeout", "60s",
-            "--contimeout", "20s",
+            # 순단을 흡수하려면 목록 캐시가 어느 정도 길어야 한다. 10초로 짧게 잡았더니
+            # 잠깐의 끊김이 곧바로 탐색기 오류로 번역됐다.
+            "--dir-cache-time", "3m",
+            # 재시도는 '짧고 확실하게'. --timeout(60s) × --low-level-retries 가 그대로
+            # 곱해지므로 20회는 최악의 경우 탐색기를 20분 붙잡는다. 오래 매달리기보다
+            # 빨리 실패하고 워치독이 재마운트하는 편이 회복이 빠르다.
+            "--low-level-retries", "4",
+            "--timeout", "30s",          # IO 유휴 타임아웃
+            "--contimeout", "15s",
             "--ftp-close-timeout", "10s",
+            # 죽은 연결을 오래 물고 있지 않게 유휴 연결을 정리한다(핵심: rclone 이
+            # abort 된 소켓을 계속 재사용하는 바람에 수 분간 전부 실패했다).
+            "--ftp-idle-timeout", "30s",
+            "--ftp-concurrency", "8",
             # 마운트가 조용히 죽으면 원인을 알 길이 없었다 — 로그를 파일로 남긴다.
             "--log-file", log_path(), "--log-level", "INFO",
             "--no-console"]
-    subprocess.Popen(args, creationflags=_NOWINDOW)
+    proc = subprocess.Popen(args, creationflags=_NOWINDOW)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if is_mounted(point):
             return
+        if proc.poll() is not None:      # rclone 이 스스로 죽었다 — 더 기다릴 이유가 없다
+            raise RuntimeError(
+                f"rclone 이 마운트에 실패했습니다 (종료코드 {proc.returncode}). "
+                f"자세한 내용은 {log_path()} 를 확인하세요.")
         time.sleep(0.5)
+    # 타임아웃: 우리가 띄운 프로세스를 반드시 회수한다. 안 그러면 워치독이 재시도할
+    # 때마다 좀비 rclone 이 하나씩 쌓여 서버 연결만 갉아먹는다.
+    try:
+        proc.kill()
+        proc.wait(timeout=5)
+    except Exception:  # noqa: BLE001
+        pass
     raise RuntimeError(f"{point} 마운트가 시간 안에 준비되지 않았습니다.")
 
 
@@ -299,17 +342,31 @@ def _our_rclone_pids(point: str) -> list[int]:
         pid, _, cmd = line.partition("|")
         if not pid.strip().isdigit() or not cmd:
             continue
-        if needle in os.path.normcase(cmd) and " mount " in cmd:
-            pids.append(int(pid.strip()))
+        if not _cmd_targets_point(cmd, needle):
+            continue
+        pids.append(int(pid.strip()))
     return pids
+
+
+def _cmd_targets_point(cmd: str, needle: str) -> bool:
+    """rclone 명령줄이 '정확히 이 마운트 지점'을 대상으로 하는지.
+    단순 부분문자열이면 형제 경로(...\\genDISK2)나 하위 경로의 남의 마운트까지
+    잡아 강제 종료해 버린다 — 경계를 확인해 그런 오탐을 막는다."""
+    low = os.path.normcase(cmd)
+    if " mount " not in low or needle not in low:
+        return False
+    i = low.find(needle)
+    tail = low[i + len(needle):i + len(needle) + 1]
+    return tail in ("", " ", '"', "\\", "\t")     # 뒤에 경로가 더 붙으면 다른 지점
 
 
 def unmount(point: str, timeout: float = 15.0):
     """이 마운트만 해제한다. 먼저 정상 종료를 시도해 쓰기 버퍼를 비울 기회를 준다
-    (--vfs-cache-mode writes 라 강제 종료하면 아직 안 올라간 파일이 사라진다)."""
+    (--vfs-cache-mode writes 라 강제 종료하면 아직 안 올라간 파일이 사라진다).
+
+    주의: 마운트가 이미 보이지 않아도 프로세스는 남아 있을 수 있다(마운트 타임아웃·
+    비정상 종료). 그때도 반드시 회수해야 좀비 rclone 이 쌓이지 않는다."""
     point = point.rstrip("\\")
-    if not is_mounted(point):
-        return True
     pids = _our_rclone_pids(point)
     if not pids:
         return not is_mounted(point)
@@ -317,10 +374,10 @@ def unmount(point: str, timeout: float = 15.0):
         _run(["taskkill", "/PID", str(pid)], timeout=20)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not is_mounted(point):
+        if not is_mounted(point) and not _our_rclone_pids(point):
             return True
-        time.sleep(0.25)
-    for pid in pids:                       # 2차: 그래도 안 내려가면 강제
+        time.sleep(0.5)
+    for pid in _our_rclone_pids(point) or pids:   # 2차: 남은 것만 강제 종료
         _run(["taskkill", "/F", "/PID", str(pid)], timeout=20)
     for _ in range(20):
         if not is_mounted(point):
