@@ -245,6 +245,40 @@ def probe(point: str, timeout: float = 8.0) -> bool:
     return result.get("ok", False)          # 시간 안에 응답 없으면 비정상으로 본다
 
 
+def recent_errors(seconds: float = 120.0, limit: int = 4000) -> int:
+    """최근 N초 안에 rclone 로그에 찍힌 연결 오류 수.
+
+    프로브가 실패했을 때 '연결이 죽었나'와 '단지 바쁜가'를 가르는 데 쓴다.
+    썸네일 생성처럼 전송이 몰리면 목록 응답이 늦어 프로브가 실패할 수 있는데,
+    그때 재마운트하면 받던 것을 끊어 오히려 악화된다. 진짜 사망이면 로그에
+    연결 오류(aborted/reset/timeout)가 쏟아진다."""
+    import re
+    path = os.path.join(os.environ.get("LOCALAPPDATA") or "", "genDISK", "rclone.log")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            try:
+                f.seek(max(0, os.path.getsize(path) - 400_000))
+                f.readline()
+            except OSError:
+                pass
+            lines = f.readlines()[-limit:]
+    except OSError:
+        return 0
+    cutoff = time.time() - seconds
+    pat = re.compile(r"aborted|reset by peer|i/o timeout|connection refused|Dir\.Stat error")
+    n = 0
+    for ln in lines:
+        if "ERROR" not in ln or not pat.search(ln):
+            continue
+        try:
+            ts = time.mktime(time.strptime(ln[:19], "%Y/%m/%d %H:%M:%S"))
+        except ValueError:
+            continue
+        if ts >= cutoff:
+            n += 1
+    return n
+
+
 def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
     """마운트 지점에 서버를 연결한다.
 
@@ -292,7 +326,18 @@ def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
     rc = rclone_path()
     args = [rc, "mount", f"{REMOTE}:", point,
             "--volname", volname,
-            "--vfs-cache-mode", "writes",  # 쓰기만 임시 버퍼 — 목록·읽기는 서버 직결
+            # 썸네일·미리 보기가 실용적으로 동작하려면 읽기 캐시가 필요하다.
+            # writes 모드에서는 탐색기가 같은 파일을 볼 때마다 매번 다시 내려받아
+            # 폴더 하나 여는 데 FTP 연결 8개가 모두 묶이고 화면이 멈췄다.
+            # full 모드 + 용량·기간 상한으로 '한 번 받은 것만' 잠시 재사용한다.
+            "--vfs-cache-mode", "full",
+            "--vfs-cache-max-size", "2G",
+            "--vfs-cache-max-age", "24h",
+            # 썸네일은 파일 앞부분만 읽는다. 기본 청크가 128M 이라 큰 동영상까지
+            # 통째로 받아왔다 — 작게 시작해 필요할 때만 키운다.
+            "--vfs-read-chunk-size", "1M",
+            "--vfs-read-chunk-size-limit", "128M",
+            "--vfs-fast-fingerprint",     # 변경 감지에 드는 메타데이터 왕복 감소
             # 순단을 흡수하려면 목록 캐시가 어느 정도 길어야 한다. 10초로 짧게 잡았더니
             # 잠깐의 끊김이 곧바로 탐색기 오류로 번역됐다.
             "--dir-cache-time", "3m",
@@ -306,7 +351,10 @@ def mount(point: str, volname: str = "genDISK Drive", timeout: float = 25.0):
             # 죽은 연결을 오래 물고 있지 않게 유휴 연결을 정리한다(핵심: rclone 이
             # abort 된 소켓을 계속 재사용하는 바람에 수 분간 전부 실패했다).
             "--ftp-idle-timeout", "30s",
-            "--ftp-concurrency", "8",
+            # 썸네일은 여러 파일을 동시에 읽는다. 8개로는 폴더 하나에 금방 포화돼
+            # 목록 조회까지 밀렸다(서버는 IP당 64까지 허용).
+            "--ftp-concurrency", "16",
+            "--transfers", "8",
             # 마운트가 조용히 죽으면 원인을 알 길이 없었다 — 로그를 파일로 남긴다.
             "--log-file", log_path(), "--log-level", "INFO",
             "--no-console"]

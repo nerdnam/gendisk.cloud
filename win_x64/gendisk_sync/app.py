@@ -1155,9 +1155,18 @@ class App:
                             self.set_status("genDISK Drive 연결됨 (FTP)", SUCCESS)
                         fails, wait, sick = 0, 30, 0
                         continue
+                    # 응답이 없다고 다 죽은 건 아니다. 썸네일 생성처럼 전송이 몰리면
+                    # 목록 응답이 늦어질 뿐인데, 그때 재마운트하면 받던 것을 끊어
+                    # 오히려 악화된다. 진짜 사망이면 로그에 연결 오류가 쏟아진다.
+                    errs = ftp_drive.recent_errors(120)
+                    if errs == 0:
+                        self.log("genDISK Drive 응답이 느립니다 (전송 중인 것으로 보임) "
+                                 "— 재연결하지 않고 기다립니다.")
+                        sick, wait = 0, 30
+                        continue
                     sick += 1
-                    self.log(f"genDISK Drive 응답 없음 ({sick}/{self.SICK_LIMIT}) — "
-                             "연결이 끊겼는지 확인 중입니다.")
+                    self.log(f"genDISK Drive 응답 없음 ({sick}/{self.SICK_LIMIT}, "
+                             f"최근 연결오류 {errs}건) — 확인 중입니다.")
                     if sick < self.SICK_LIMIT:
                         wait = 15              # 의심 구간에서는 더 자주 확인
                         continue
