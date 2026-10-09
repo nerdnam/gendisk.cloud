@@ -341,7 +341,7 @@ class UploadInit(BaseModel):
     space: str = HOME_SPACE
     path: str = ""
     rel: str = ""            # 하위폴더 포함 상대경로 또는 파일명 (폴더 구조 보존)
-    size: int = 0            # 총 크기(선택, 표시용)
+    size: int = 0            # 총 크기(선택) — 주면 complete 때 받은 바이트 수와 대조한다
     overwrite: bool = False  # True면 같은 경로를 원자적으로 덮어쓴다(카메라 백업 등 멱등 재시도용)
 
 
@@ -445,6 +445,14 @@ def upload_complete(upload_id: str, user: dict = Depends(current_user)):
     """마무리: 용량 검사 후 대상 위치로 원자적 이동(이름 겹치면 (1) 회피)."""
     meta, part, meta_p = _load_session(upload_id, user)
     space, path, rel = meta["space"], meta["path"], meta.get("rel", "")
+    # 크기 대조: init 에서 선언한 크기와 실제 받은 바이트가 다르면 조각이 유실/변형된
+    # 것이다. 그대로 저장하면 깨진(또는 원본과 다른) 파일이 '성공'으로 남으므로 거부한다.
+    declared = int(meta.get("size") or 0)
+    received = part.stat().st_size
+    if declared > 0 and received != declared:
+        part.unlink(missing_ok=True); meta_p.unlink(missing_ok=True)
+        raise HTTPException(409, f"업로드 크기 불일치 (선언 {declared}, 받음 {received}) — "
+                                 "다시 시도해 주세요")
     parts = [p for p in rel.replace("\\", "/").split("/") if p and p not in (".", "..")]
     if not parts:
         part.unlink(missing_ok=True); meta_p.unlink(missing_ok=True)
